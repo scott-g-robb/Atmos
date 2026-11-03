@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atmos · Weather for your desktop</title>
+<meta name="description" content="Interactive weather for your Mac. Snow, rain, leaves, mist and fireflies respond to your cursor. Live Weather follows the sky outside.">
+<meta property="og:title" content="Atmos">
+<meta property="og:description" content="Bring the weather to your desktop. Interactive scenes follow your local sky.">
+<meta name="theme-color" content="#17130f">
+<link rel="canonical" href="https://grobb.dev/projects/atmos">
+<link rel="icon" type="image/png" href="assets/icon-64.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Alegreya+Sans:ital,wght@0,400;0,500;0,700;1,400&family=Big+Shoulders+Display:wght@300;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --night: oklch(0.155 0.012 60);
+  --night-raised: oklch(0.2 0.012 60);
+  --ink: oklch(0.93 0.02 80);
+  --muted: oklch(0.8 0.02 75);
+  --faint: oklch(0.72 0.02 75);
+  --rule: oklch(0.93 0.02 80 / 0.12);
+  --gutter: clamp(20px, 6vw, 88px);
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--night);
+  color: var(--ink);
+  font-family: 'Alegreya Sans', 'Avenir Next', 'Segoe UI', sans-serif;
+  font-size: 19px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a:focus-visible { outline: 2px solid var(--ink); outline-offset: 4px; }
+
+.display {
+  font-family: 'Big Shoulders Display', 'Arial Narrow', sans-serif;
+  font-weight: 300;
+  line-height: 0.9;
+  letter-spacing: 0.005em;
+  text-transform: uppercase;
+}
+.kicker {
+  margin: 0 0 22px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+}
+
+canvas.snow, .night-light, .vignette {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+canvas.snow { z-index: 3; }
+body.snow-behind canvas.snow { z-index: 1; }
+.vignette { background: radial-gradient(ellipse 85% 78% at 55% 42%, transparent 52%, oklch(0.08 0.01 60 / 0.62)); }
+.grain {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  opacity: 0.05;
+  pointer-events: none;
+}
+
+.lamp {
+  position: absolute;
+  top: 0;
+  z-index: 1;
+  height: 64px;
+  pointer-events: none;
+}
+.lamp-right { left: 72%; right: 0; }
+.lamp-left { left: 0; width: 30%; }
+.lamp-arm {
+  position: absolute;
+  top: 30px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: oklch(0.27 0.012 60);
+}
+.lamp-head {
+  position: absolute;
+  top: 18px;
+  width: 60px;
+  height: 40px;
+  overflow: visible;
+}
+.lamp-right .lamp-head { left: -30px; }
+.lamp-left .lamp-head { right: -30px; }
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 52px;
+  padding: 0 28px;
+  border-radius: 2px;
+  background: var(--ink);
+  color: var(--night);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-decoration: none;
+  text-transform: uppercase;
+  transition: transform 0.5s var(--ease-out), background-color 0.3s var(--ease-out);
+}
+.button:hover { transform: translateY(-2px); background: oklch(0.97 0.03 82); }
+.button svg { flex: none; width: 15px; height: 15px; margin-right: 12px; fill: currentColor; }
+.button[data-platform="mac"] svg { margin-top: -3px; }
+.button.secondary {
+  background: transparent;
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px oklch(0.93 0.02 80 / 0.4);
+}
+.button.secondary:hover { background: oklch(0.93 0.02 80 / 0.06); box-shadow: inset 0 0 0 1px oklch(0.93 0.02 80 / 0.8); }
+/* Only the visitor's own platform says "Download for"; the others are named alone, though screen readers still hear it all. */
+.button.secondary .lead {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.actions { margin-top: 40px; }
+.downloads { display: flex; flex-wrap: wrap; gap: 12px; }
+.meta { margin: 18px 0 0; color: var(--faint); font-size: 16px; text-wrap: pretty; }
+.meta a { color: inherit; text-underline-offset: 3px; }
+.meta a:hover { color: var(--ink); }
+@media (max-width: 560px) { .downloads .button { flex: 1 1 100%; } }
+
+/* Street */
+
+.street {
+  position: relative;
+  overflow: hidden;
+  min-height: max(700px, 100svh);
+}
+.nav {
+  position: relative;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 28px var(--gutter);
+}
+.wordmark {
+  color: inherit;
+  font-family: 'Big Shoulders Display', 'Arial Narrow', sans-serif;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+.nav-links { display: flex; gap: 28px; font-size: 16px; font-weight: 500; }
+.nav-links a { color: inherit; text-decoration: none; }
+.nav-links a:hover { color: oklch(0.87 0.08 75); }
+.street-copy {
+  position: relative;
+  z-index: 2;
+  max-width: 800px;
+  padding: clamp(24px, 5vh, 90px) var(--gutter) 150px;
+}
+.street h1 { margin: 0; font-size: clamp(56px, min(10vw, 13vh), 150px); }
+.street h1 span { display: block; }
+.lede {
+  max-width: 40ch;
+  margin: 34px 0 0;
+  color: var(--muted);
+  font-size: 20px;
+  text-wrap: pretty;
+}
+.hint {
+  position: absolute;
+  right: var(--gutter);
+  bottom: 104px;
+  z-index: 2;
+  margin: 0;
+  color: var(--faint);
+  font-size: 17px;
+  font-style: italic;
+}
+@media (hover: none) { .hint { display: none; } }
+@media (max-width: 720px) { .lamp-right { top: 70px; left: 74%; } }
+
+/* Halloween: pumpkins glowing in the street's drift, and a ghost's sign held up out of it (snow.js) */
+
+.halloween-only { display: none; }
+.halloween .halloween-only { display: contents; }
+.defs { position: absolute; }
+.pumpkin {
+  position: absolute;
+  bottom: 4px;
+  z-index: 2;
+  aspect-ratio: 100 / 82;
+  filter: drop-shadow(0 0 16px oklch(0.72 0.16 55 / 0.4));
+  pointer-events: none;
+}
+.pumpkin-near { left: calc(72% + 46px); width: 64px; }
+.pumpkin-far { left: calc(72% - 300px); width: 46px; }
+.pumpkin-face { animation: candle 2.6s linear infinite; }
+.pumpkin-far .pumpkin-face { animation-delay: -1.1s; }
+@keyframes candle {
+  0%, 100% { opacity: 1; }
+  18% { opacity: 0.84; }
+  34% { opacity: 0.97; }
+  58% { opacity: 0.8; }
+  77% { opacity: 0.94; }
+}
+.boo {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 2;
+  height: auto;
+  transform-origin: 50% 100%;
+  visibility: hidden;
+  pointer-events: none;
+}
+@media (max-width: 720px) {
+  .pumpkin-near { left: calc(74% + 20px); width: 48px; }
+  .pumpkin-far { left: calc(74% - 170px); width: 36px; }
+}
+@media (prefers-reduced-motion: reduce) { .pumpkin-face { animation: none; } }
+
+/* Windows */
+
+.windows {
+  position: relative;
+  overflow: hidden;
+  padding: 190px var(--gutter) 190px;
+}
+.windows-inner {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 72px 80px;
+  max-width: 1240px;
+  margin: 0 auto;
+}
+.window {
+  position: relative;
+  flex: 1 1 540px;
+  max-width: 760px;
+  padding: 68px clamp(24px, 5vw, 64px) 58px;
+  border-radius: 18px;
+  background: var(--night-raised);
+  box-shadow: 0 0 0 1px oklch(0.93 0.02 80 / 0.08), 0 40px 80px -30px oklch(0.05 0.01 60 / 0.8);
+}
+.window-dots {
+  position: absolute;
+  top: 18px;
+  left: 20px;
+  display: flex;
+  gap: 8px;
+}
+.window-dots span {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: oklch(0.34 0.012 60);
+}
+.window h2 { margin: 0; font-size: clamp(48px, 6vw, 96px); }
+.window .body {
+  max-width: 36em;
+  margin: 28px 0 0;
+  color: var(--muted);
+  font-size: 20px;
+  text-wrap: pretty;
+}
+
+.menu-demo {
+  display: flex;
+  flex: 0 1 300px;
+  flex-direction: column;
+  gap: 20px;
+  margin-top: 110px;
+}
+.menu {
+  padding: 6px;
+  border-radius: 12px;
+  background: oklch(0.23 0.012 60);
+  box-shadow: 0 0 0 1px oklch(0.93 0.02 80 / 0.1), 0 28px 56px -20px oklch(0.05 0.01 60 / 0.85);
+  color: oklch(0.91 0.012 80);
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  font-size: 14px;
+  line-height: 1;
+}
+.menu-head {
+  padding: 7px 12px 5px;
+  color: oklch(0.68 0.015 75);
+  font-size: 12px;
+  font-weight: 600;
+}
+.menu-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: 26px;
+  margin: 0;
+  padding: 0 12px 0 30px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+.menu-item:hover, .menu-item:focus-visible { background: oklch(0.34 0.025 65); outline: none; }
+.menu-item[aria-disabled="true"] { color: oklch(0.55 0.012 75); }
+.menu-item[aria-disabled="true"]:hover { background: none; }
+.menu-item[aria-checked="true"]::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 13px;
+  width: 9px;
+  height: 5px;
+  border-bottom: 1.6px solid currentColor;
+  border-left: 1.6px solid currentColor;
+  transform: translateY(-70%) rotate(-45deg);
+}
+.menu-key { color: oklch(0.66 0.015 75); }
+.menu-sep {
+  height: 1px;
+  margin: 5px 12px;
+  background: oklch(0.93 0.02 80 / 0.1);
+}
+.caption {
+  margin: 0;
+  padding-left: 4px;
+  color: var(--faint);
+  font-size: 17px;
+  line-height: 1.5;
+}
+
+/* A screenshot floating in the corner, as macOS shows one right after it's taken */
+
+.capture {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 20;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--night);
+  box-shadow: 0 0 0 1px oklch(0.93 0.02 80 / 0.22), 0 18px 40px -12px oklch(0.05 0.01 60 / 0.9);
+  pointer-events: none;
+}
+.capture-stage { position: relative; transform-origin: 0 0; }
+@media (prefers-reduced-motion: no-preference) {
+  .capture { animation: capture-in 0.55s var(--ease-out) both; }
+  .capture.leaving { animation: capture-out 0.4s cubic-bezier(0.5, 0, 0.75, 0) forwards; }
+}
+@keyframes capture-in { from { transform: translateX(calc(100% + 40px)); } }
+@keyframes capture-out { to { transform: translateX(calc(100% + 40px)); } }
+
+/* Notes */
+
+.notes { padding: clamp(72px, 10vw, 150px) var(--gutter); }
+.notes-inner {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 40px 80px;
+  max-width: 1240px;
+  margin: 0 auto;
+}
+.notes h2 {
+  position: sticky;
+  top: 48px;
+  align-self: start;
+  margin: 0;
+  font-size: clamp(56px, 6.5vw, 104px);
+}
+.traits { margin: 0; }
+.trait {
+  display: grid;
+  grid-template-columns: minmax(110px, 170px) minmax(0, 1fr);
+  gap: 8px 32px;
+  padding: 30px 0;
+  border-top: 1px solid var(--rule);
+}
+.trait:last-child { border-bottom: 1px solid var(--rule); }
+.trait dt {
+  font-family: 'Big Shoulders Display', 'Arial Narrow', sans-serif;
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.trait dd {
+  max-width: 46ch;
+  margin: 0;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+@media (max-width: 860px) {
+  .notes-inner { grid-template-columns: minmax(0, 1fr); }
+  .notes h2 { position: static; }
+}
+@media (max-width: 560px) {
+  .trait { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* End */
+
+.end { padding: clamp(24px, 4vw, 60px) var(--gutter) 40px; }
+.end-inner { max-width: 1240px; margin: 0 auto; }
+.end h2 { margin: 0; font-size: clamp(72px, 14vw, 200px); }
+.colophon {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px 24px;
+  margin-top: clamp(80px, 10vw, 140px);
+  padding-top: 24px;
+  border-top: 1px solid var(--rule);
+  color: var(--faint);
+  font-size: 16px;
+}
+.colophon a { color: inherit; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .reveal {
+    opacity: 0;
+    transform: translateY(16px);
+    animation: reveal 1.2s var(--ease-out) forwards;
+  }
+  .reveal-2 { animation-delay: 0.12s; }
+  .reveal-3 { animation-delay: 0.3s; }
+  .reveal-4 { animation-delay: 0.45s; }
+}
+@keyframes reveal { to { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+
+<header class="street" data-scene="night" data-ground="72">
+  <canvas class="night-light" aria-hidden="true"></canvas>
+  <div class="vignette" aria-hidden="true"></div>
+  <div class="lamp lamp-right" aria-hidden="true">
+    <span class="lamp-arm"></span>
+    <svg class="lamp-head" viewBox="0 0 60 40">
+      <path d="M16 26 L44 26 L37 14 L23 14 Z" fill="#2c2824"/>
+      <path d="M30 12 L30 14" stroke="#3a3530" stroke-width="2"/>
+      <ellipse cx="30" cy="26.5" rx="8" ry="2.2" fill="#fff4dc"/>
+    </svg>
+  </div>
+
+  <nav class="nav" aria-label="Main">
+    <a class="wordmark" href="https://grobb.dev/projects/atmos">Atmos</a>
+    <div class="nav-links">
+      <a href="https://github.com/scott-g-robb/Atmos">GitHub</a>
+      <a href="#download">Download</a>
+    </div>
+  </nav>
+
+  <div class="street-copy">
+    <p class="kicker reveal">Atmos for macOS</p>
+    <h1 class="display reveal reveal-2"><span>A little atmosphere.</span> <span>On your</span> <span>desktop.</span></h1>
+    <p class="lede reveal reveal-3">Snow settles on your windows. Rain splashes into reflective puddles. Mist curls around your cursor, and fireflies leave glowing trails. Choose a scene, or let Live Weather follow the sky outside.</p>
+    <div class="actions reveal reveal-4">
+      <div class="downloads">
+        <a class="button" href="https://github.com/scott-g-robb/Atmos/releases/latest/download/Atmos.dmg" data-platform="mac"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg><span><span class="lead">Download for </span>macOS</span></a>
+      </div>
+      <p class="meta">macOS 14 or later · Apple silicon and Intel</p>
+    </div>
+  </div>
+
+  <p class="hint">Try it: sweep the snow.</p>
+  <div class="halloween-only" aria-hidden="true">
+    <svg width="0" height="0" class="defs">
+      <defs>
+        <radialGradient id="pumpkin-skin" cx="42%" cy="34%" r="72%">
+          <stop offset="0" stop-color="#8c3d14"/>
+          <stop offset="1" stop-color="#2e1207"/>
+        </radialGradient>
+        <radialGradient id="pumpkin-fire" cx="50%" cy="55%" r="60%">
+          <stop offset="0" stop-color="#ffe3a0"/>
+          <stop offset="0.55" stop-color="#ffb04a"/>
+          <stop offset="1" stop-color="#e2681a"/>
+        </radialGradient>
+      </defs>
+      <symbol id="pumpkin" viewBox="0 0 100 82">
+        <path d="M47 18c-1-7 3-13 10-15l1 4c-4 2-6 6-5 11z" fill="#2a2416"/>
+        <g fill="url(#pumpkin-skin)">
+          <ellipse cx="33" cy="50" rx="25" ry="30"/>
+          <ellipse cx="67" cy="50" rx="25" ry="30"/>
+          <ellipse cx="50" cy="49" rx="23" ry="32"/>
+        </g>
+        <path d="M38 22c-8 12-8 44 0 56M62 22c8 12 8 44 0 56" fill="none" stroke="#1f0b04" stroke-opacity="0.55" stroke-width="1.6"/>
+        <g class="pumpkin-face" fill="url(#pumpkin-fire)">
+          <path d="M29 42l12-1-6-10z"/>
+          <path d="M59 41l12 1-6-11z"/>
+          <path d="M22 50c8 6 16 8 20 8l3-4 4 5 4-5 4 4 3-4c4 0 9-1 14-4-3 9-12 15-26 15s-23-6-26-15z"/>
+        </g>
+      </symbol>
+    </svg>
+    <svg class="pumpkin pumpkin-near"><use href="#pumpkin"/></svg>
+    <svg class="pumpkin pumpkin-far"><use href="#pumpkin"/></svg>
+    <img class="boo" src="assets/halloween/boo.png" alt="" width="45" height="52">
+  </div>
+  <canvas class="snow" aria-hidden="true"></canvas>
+</header>
+
+<main>
+  <section class="windows" data-scene="night" data-ground="48" aria-labelledby="windows-title">
+    <canvas class="night-light" aria-hidden="true"></canvas>
+    <div class="vignette" aria-hidden="true"></div>
+    <div class="lamp lamp-left" aria-hidden="true">
+      <span class="lamp-arm"></span>
+      <svg class="lamp-head" viewBox="0 0 60 40">
+        <path d="M16 26 L44 26 L37 14 L23 14 Z" fill="#2c2824"/>
+        <path d="M30 12 L30 14" stroke="#3a3530" stroke-width="2"/>
+        <ellipse cx="30" cy="26.5" rx="8" ry="2.2" fill="#fff4dc"/>
+      </svg>
+    </div>
+
+    <div class="windows-inner">
+      <article class="window" data-ledge="18">
+        <div class="window-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="kicker">On your windows</p>
+        <h2 id="windows-title" class="display">It settles where it lands.</h2>
+        <p class="body">Snow gathers on the tops of your windows and the Dock, following their rounded corners. Drag a window and its snow slides off; close or minimize it and the snow falls to the drift below.</p>
+      </article>
+
+      <aside class="menu-demo">
+        <div class="menu" data-ledge="12" data-snow-menu role="menu" aria-label="Atmos settings">
+          <div class="menu-head" role="presentation">Snowfall</div>
+          <button class="menu-item" type="button" role="menuitemradio" data-snowfall="off" aria-checked="false">Off</button>
+          <button class="menu-item" type="button" role="menuitemradio" data-snowfall="light" aria-checked="false">Light</button>
+          <button class="menu-item" type="button" role="menuitemradio" data-snowfall="steady" aria-checked="true">Steady</button>
+          <button class="menu-item" type="button" role="menuitemradio" data-snowfall="heavy" aria-checked="false">Heavy</button>
+          <button class="menu-item" type="button" role="menuitemradio" data-snowfall="variable" aria-checked="false">Variable</button>
+          <div class="menu-sep" role="separator"></div>
+          <button class="menu-item" type="button" role="menuitemcheckbox" data-toggle="accumulate" aria-checked="true">Accumulate</button>
+          <button class="menu-item" type="button" role="menuitemcheckbox" data-toggle="melt" aria-checked="true">Melt Snow</button>
+          <button class="menu-item" type="button" role="menuitemcheckbox" data-toggle="windows" aria-checked="true">Snow on Windows</button>
+          <button class="menu-item" type="button" role="menuitem" data-action="clear">Clear Snow</button>
+          <div class="menu-sep" role="separator"></div>
+          <button class="menu-item" type="button" role="menuitemcheckbox" data-toggle="behind" aria-checked="false">Behind Windows</button>
+          <button class="menu-item" type="button" role="menuitemcheckbox" data-toggle="screenshots" aria-checked="false">Show in Screenshots</button>
+          <button class="menu-item" type="button" role="menuitemcheckbox" data-toggle="login" aria-checked="false">Open at Login</button>
+          <div class="menu-sep" role="separator"></div>
+          <button class="menu-item" type="button" role="menuitem" data-action="quit"><span>Quit</span><span class="menu-key">⌘Q</span></button>
+        </div>
+        <p class="caption">A small snow demo — Atmos has twelve scenes and Live Weather. This menu works. Try Heavy, turn off Melt Snow and watch the drift grow, or flip Show in Screenshots and see what a screenshot keeps.</p>
+      </aside>
+    </div>
+    <canvas class="snow" aria-hidden="true"></canvas>
+  </section>
+
+  <section class="notes" aria-labelledby="notes-title">
+    <div class="notes-inner">
+      <h2 id="notes-title" class="display">Weather that moves with you</h2>
+      <dl class="traits">
+        <div class="trait">
+          <dt>Follows the sky</dt>
+          <dd>Live Weather blends scenes to match local conditions. Choose Apple Weather or Open-Meteo, with the location, conditions and active source clearly shown.</dd>
+        </div>
+        <div class="trait">
+          <dt>Settles</dt>
+          <dd>It piles up and slumps to a natural slope along the bottom of the screen, on any window with room above it, and on the Dock.</dd>
+        </div>
+        <div class="trait">
+          <dt>Reacts</dt>
+          <dd>Sweep snow and leaves aside, stir volumetric mist, or throw water into splashes. Drag a window and its puddles carry the momentum.</dd>
+        </div>
+        <div class="trait">
+          <dt>Reflects</dt>
+          <dd>Rain gathers into interactive water on windows, the Dock and the ground. Reflect your live desktop, cached window snapshots or just the wallpaper.</dd>
+        </div>
+        <div class="trait">
+          <dt>Changes naturally</dt>
+          <dd>Rain arrives while the previous snow melts. Mist disperses and puddles dry as the next scene takes over.</dd>
+        </div>
+        <div class="trait">
+          <dt>Hides</dt>
+          <dd>Screenshots and screen sharing show your desktop without it, unless you turn on Show in Screenshots.</dd>
+        </div>
+        <div class="trait">
+          <dt>Rests</dt>
+          <dd>Animation follows your display’s native refresh rate, including ProMotion. Atmos pauses while your screen sleeps, locks or is covered by a full-screen app.</dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+</main>
+
+<footer class="end" id="download">
+  <div class="end-inner">
+    <h2 class="display">Bring the sky inside.</h2>
+    <div class="actions">
+      <div class="downloads">
+        <a class="button" href="https://github.com/scott-g-robb/Atmos/releases/latest/download/Atmos.dmg" data-platform="mac"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg><span><span class="lead">Download for </span>macOS</span></a>
+      </div>
+      <p class="meta">macOS 14 or later · Apple silicon and Intel</p>
+    </div>
+    <div class="colophon">
+      <span>Atmos</span>
+      <a href="https://grobb.dev">Made by grobb</a>
+    </div>
+  </div>
+</footer>
+
+<div class="grain" aria-hidden="true"></div>
+<script src="snow.js"></script>
+</body>
+</html>

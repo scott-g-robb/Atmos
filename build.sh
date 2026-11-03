@@ -1,0 +1,66 @@
+#!/bin/zsh
+# Universal macOS build. No updater, helper processes or third-party runtime frameworks.
+set -euo pipefail
+cd "$(dirname "$0")"
+# Keep a configured local signing identity stable across rebuilds (including Keychain access).
+if [[ -z "${IDENTITY:-}" && -f build/signing-identity.txt ]]; then
+    IDENTITY="$(< build/signing-identity.txt)"
+fi
+./scripts/build-weather-core.sh
+# Keep the universal release separate from host-architecture test products.
+flags=(--scratch-path .build/universal -c release --arch arm64 --arch x86_64)
+swift build "${flags[@]}"
+products="$(swift build "${flags[@]}" --show-bin-path)"
+app=build/Atmos.app
+rm -rf "$app"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+minimum=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' Resources/Info.plist)
+vtool -set-build-version macos "$minimum" "$(xcrun --sdk macosx --show-sdk-version)" -replace \
+    -output "$app/Contents/MacOS/Atmos" "$products/Atmos"
+lipo "$app/Contents/MacOS/Atmos" -verify_arch arm64
+lipo "$app/Contents/MacOS/Atmos" -verify_arch x86_64
+cp Resources/Info.plist "$app/Contents/"
+# Native icon assets prevent macOS from nesting a legacy bitmap inside a second tile.
+xcrun actool Resources/AppIcon.icon --compile "$app/Contents/Resources" \
+    --platform macosx --minimum-deployment-target "$minimum" --app-icon AppIcon \
+    --output-partial-info-plist build/icon-info.plist --output-format human-readable-text
+swift scripts/build-icons.swift Resources/AppIcon.icon/Assets/Weather.png build/AppIcon.iconset
+iconutil -c icns build/AppIcon.iconset -o "$app/Contents/Resources/AppIcon.icns"
+cp LICENSE "$app/Contents/Resources/LICENSE.txt"
+cp NOTICE.md "$app/Contents/Resources/NOTICE.md"
+if [[ -n "${BUNDLE_IDENTIFIER:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_IDENTIFIER" "$app/Contents/Info.plist"
+fi
+entitlements=Resources/Atmos.entitlements
+if [[ -n "${WEATHERKIT_PROFILE:-}" ]]; then
+    [[ -n "${IDENTITY:-}" ]] || { echo "WeatherKit needs an Apple signing identity." >&2; exit 1; }
+    cp "$WEATHERKIT_PROFILE" "$app/Contents/embedded.provisionprofile"
+    entitlements=build/WeatherKit.entitlements
+    security cms -D -i "$WEATHERKIT_PROFILE" > build/weatherkit-profile.plist
+    python3 - <<'PY'
+import plistlib
+from pathlib import Path
+document=plistlib.loads(Path('build/weatherkit-profile.plist').read_bytes())
+if not any(p in ('OSX','macOS') for p in document.get('Platform', [])):
+    raise SystemExit('WeatherKit requires a macOS provisioning profile, not an iOS profile.')
+profile=document['Entitlements']
+app=plistlib.loads(Path('build/Atmos.app/Contents/Info.plist').read_bytes())['CFBundleIdentifier']
+identifier=profile.get('com.apple.application-identifier','')
+if not identifier.endswith('.'+app):
+    raise SystemExit('The WeatherKit profile must match the app bundle identifier. Set BUNDLE_IDENTIFIER to the registered App ID.')
+if not profile.get('com.apple.developer.weatherkit'):
+    raise SystemExit('The provisioning profile does not enable WeatherKit.')
+base=plistlib.loads(Path('Resources/Atmos.entitlements').read_bytes())
+for key in ('com.apple.application-identifier','com.apple.developer.team-identifier','com.apple.developer.weatherkit'):
+    if key in profile: base[key]=profile[key]
+Path('build/WeatherKit.entitlements').write_bytes(plistlib.dumps(base))
+PY
+fi
+if [[ -n "${IDENTITY:-}" ]]; then
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" --entitlements "$entitlements" "$app"
+else
+    codesign --force --sign - --entitlements "$entitlements" "$app"
+fi
+codesign --verify --deep --strict "$app"
+if [[ -n "${IDENTITY:-}" ]]; then print -r -- "$IDENTITY" > build/signing-identity.txt; fi
+echo "Built $app"

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Atmos</string>
+	<key>CFBundleExecutable</key>
+	<string>Atmos</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.grobb.Atmos</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Atmos</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.13.2</string>
+	<key>CFBundleVersion</key>
+	<string>41</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.lifestyle</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocationUsageDescription</key>
+	<string>Live Weather uses your approximate location for local conditions from Apple Weather, or Open-Meteo when Apple Weather is unavailable. The menu shows the active source.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Screen Reflections uses small, temporary images of this display to reflect windows in rain puddles. Images stay on this Mac and are never saved or uploaded.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 grobb. Portions © 2026 Mykhailo Bezruchko.</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+</dict>
+</plist>
