@@ -15,6 +15,7 @@ enum AppleWeatherREST {
     let temperature: Double
     let temperatureApparent: Double
     let windSpeed: Double
+    let windGust: Double?
     let windDirection: Double?
     let precipitationIntensity: Double?
     let metadata: Metadata
@@ -47,6 +48,7 @@ enum AppleWeatherREST {
       temperature: current.temperature,
       windSpeed: current.windSpeed, windDirection: current.windDirection ?? 0,
       precipitation: current.precipitationIntensity ?? 0, isDay: current.daylight ? 1 : 0)
+    snapshot.windGust = current.windGust
     snapshot.humidity = current.humidity * 100
     snapshot.cloudCover = current.cloudCover * 100
     snapshot.apparentTemperature = current.temperatureApparent

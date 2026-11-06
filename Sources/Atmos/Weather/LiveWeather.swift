@@ -1,5 +1,6 @@
 import AppKit
 import CoreLocation
+import Network
 
 /// Location and weather are requested only while Live Weather is selected and the session is awake.
 /// Coordinates stay in memory; only rounded coordinates are sent to Open-Meteo over HTTPS.
@@ -15,7 +16,10 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
   private(set) var providerURL = URL(string: "https://open-meteo.com/")!
   private(set) var attributionMark: NSImage?
   private let geocoder = CLGeocoder()
-  private var appleRetryAt = Date.distantPast
+  private var recovery = WeatherRecovery()
+  private var appleFailures = 0
+  private var networkMonitor: NWPathMonitor?
+  private var attributionTask: Task<Void, Never>?
   var changed: () -> Void = {}
 
   private var manager: CLLocationManager?
@@ -54,11 +58,13 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     if enabled {
       if manager == nil {
         let manager = CLLocationManager()
-        manager.desiredAccuracy = kCLLocationAccuracyKilometer
-        manager.distanceFilter = 5_000
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        manager.distanceFilter = 1_000
         self.manager = manager
         manager.delegate = self
       }
+      recovery.resume()
+      startNetworkMonitor()
       refresh(force: true)
     } else {
       coordinate = nil
@@ -76,7 +82,8 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     cancel()
     snapshot = nil
     updatedAt = nil
-    appleRetryAt = .distantPast
+    appleFailures = 0
+    startNetworkMonitor()
     provider = source == .openMeteo ? "Open-Meteo" : "Apple Weather"
     if enabled { refresh(force: true) }
     changed()
@@ -88,13 +95,20 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     if suspended {
       cancel()
     } else if enabled {
+      recovery.resume()
+      appleFailures = 0
+      failures = 0
+      lastRequest = .distantPast
+      startNetworkMonitor()
       scheduleExpiry()
       refresh(force: true)
     }
   }
 
   func refresh(force: Bool = false) {
-    guard enabled, !suspended, task == nil, !locating else { return }
+    guard enabled, !suspended else { return }
+    if force, task != nil, Date().timeIntervalSince(lastRequest) > 5 { cancelRequest() }
+    guard task == nil, !locating else { return }
     guard force || Date().timeIntervalSince(lastRequest) >= 60 else { return }
     timer?.invalidate()
     if Preferences.weatherSource == .apple && !AppleWeather.isAvailable {
@@ -112,10 +126,18 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
       NSApp.activate(ignoringOtherApps: true)
       manager.requestWhenInUseAuthorization()
     case .authorized, .authorizedAlways:
-      if let coordinate, abs(coordinate.timestamp.timeIntervalSinceNow) < 3600 {
+      if let coordinate, abs(coordinate.timestamp.timeIntervalSinceNow) < 600 {
+
         if locationName.hasPrefix("Approximate location:") { resolveName(coordinate) }
         fetch(coordinate.coordinate)
       } else {
+        // The last in-memory approximate position can bridge location-service wakeup.
+        // A fresh location is still requested, and a move cancels any old-position request.
+        if recovery.isRecovering(), let coordinate,
+          abs(coordinate.timestamp.timeIntervalSinceNow) < 86400
+        {
+          fetch(coordinate.coordinate)
+        }
         locating = true
         status = "Finding your local weather…"
         changed()
@@ -125,7 +147,12 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
           guard let self, locating else { return }
           manager.stopUpdatingLocation()
           locating = false
-          failed("Location unavailable — retrying shortly")
+          if task == nil {
+            failed(
+              current == nil
+                ? "Location unavailable — retrying shortly"
+                : "Location unavailable — keeping recent weather")
+          }
         }
       }
     case .denied, .restricted:
@@ -148,6 +175,7 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     if manager.authorizationStatus == .denied || manager.authorizationStatus == .restricted {
       cancel()
     }
+    startNetworkMonitor()
     refresh(force: true)
   }
 
@@ -164,20 +192,29 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
       failed("Location unavailable — retrying shortly")
       return
     }
+    let moved = coordinate.map { location.distance(from: $0) > 2000 } ?? true
+    if moved && task != nil { cancelRequest() }
     coordinate = location
     locationDetail = String(
-      format: "Approximate location: %.2f°, %.2f°", location.coordinate.latitude,
+      format: "Approximate location: %.3f°, %.3f°", location.coordinate.latitude,
       location.coordinate.longitude)
     locationName = locationDetail
     resolveName(location)
-    fetch(location.coordinate)
+    if moved || current == nil || (updatedAt.map { Date().timeIntervalSince($0) > 60 } ?? true) {
+      fetch(location.coordinate)
+    }
   }
 
   func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
     guard enabled, !suspended, locating else { return }
     locationTimeout?.invalidate()
     locating = false
-    failed("Location unavailable — retrying shortly")
+    if task == nil {
+      failed(
+        current == nil
+          ? "Location unavailable — retrying shortly"
+          : "Location unavailable — keeping recent weather")
+    }
   }
 
   private func fetch(_ coordinate: CLLocationCoordinate2D) {
@@ -193,47 +230,37 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     task = Task { @MainActor [weak self] in
       guard let self else { return }
       do {
-        var weather: WeatherSnapshot?
-        if Preferences.weatherSource != .openMeteo && AppleWeather.isAvailable
-          && (Preferences.weatherSource == .apple || Date() >= appleRetryAt)
-        {
-          do {
+        let source = Preferences.weatherSource
+        let reading = try await WeatherRequest.fetch(
+          source: source, appleAvailable: AppleWeather.isAvailable,
+          apple: {
             let rounded = CLLocation(
               latitude: (coordinate.latitude * 100).rounded() / 100,
               longitude: (coordinate.longitude * 100).rounded() / 100)
-            let reading = try await AppleWeather.fetch(at: rounded)
-            guard enabled, !suspended, generation == token, !Task.isCancelled else { return }
-            if attributionMark == nil {
-              let (markData, _) = try await session.data(
-                from: reading.attribution.combinedMarkDarkURL)
-              guard enabled, !suspended, generation == token, !Task.isCancelled else { return }
-              guard let mark = NSImage(data: markData) else {
-                throw URLError(.cannotDecodeContentData)
-              }
-              let ratio = mark.size.width / max(1, mark.size.height)
-              mark.size = NSSize(width: 16 * ratio, height: 16)
-              mark.isTemplate = true
-              attributionMark = mark
-            }
-            provider = "Apple Weather"
-            providerURL = reading.attribution.legalPageURL
-            weather = reading.snapshot
-          } catch {
-            guard generation == token, enabled, !suspended, !Task.isCancelled else { return }
-            if Preferences.weatherSource == .apple { throw error }
-            appleRetryAt = Date().addingTimeInterval(3600)
+            return try await AppleWeather.fetch(at: rounded)
+          },
+          openMeteo: {
+            let (data, response) = try await self.session.data(from: url)
+            return try WeatherAPI.decode(data, response: response)
+          })
+        guard enabled, !suspended, generation == token, !Task.isCancelled else { return }
+        var weather = reading.snapshot
+        var refreshAfter: TimeInterval = 900
+        switch reading {
+        case .apple(let apple):
+          appleFailures = 0
+          provider = "Apple Weather"
+          providerURL = apple.attribution.legalPageURL
+          loadAttributionMark(apple.attribution, generation: token)
+        case .openMeteo:
+          provider = source == .openMeteo ? "Open-Meteo" : "Open-Meteo · Apple Weather fallback"
+          providerURL = URL(string: "https://open-meteo.com/")!
+          if source == .automatic && (AppleWeather.isAvailable || recovery.isRecovering()) {
+            appleFailures += 1
+            refreshAfter = WeatherRecovery.appleRetryDelay(appleFailures)
           }
         }
-        if weather == nil {
-          let (data, response) = try await session.data(from: url)
-          guard enabled, !suspended, generation == token, !Task.isCancelled else { return }
-          weather = try WeatherAPI.decode(data, response: response)
-          provider =
-            Preferences.weatherSource == .openMeteo
-            ? "Open-Meteo" : "Open-Meteo · Apple Weather fallback"
-          providerURL = URL(string: "https://open-meteo.com/")!
-        }
-        guard let weather else { throw URLError(.cannotParseResponse) }
+        weather.latitude = (coordinate.latitude * 100).rounded() / 100
         task = nil
         snapshot = weather
         updatedAt = Date()
@@ -242,7 +269,7 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
           "\(weather.condition) · \(Int(weather.temperature.rounded()))°C · \(Int(weather.windSpeed.rounded())) km/h"
         changed()
         scheduleExpiry()
-        schedule(after: 900)
+        schedule(after: refreshAfter)
       } catch {
         guard generation == token, enabled, !suspended, !Task.isCancelled else { return }
         task = nil
@@ -253,23 +280,60 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     }
   }
 
+  private func loadAttributionMark(_ attribution: AppleWeather.Attribution, generation token: Int) {
+    guard attributionMark == nil, attributionTask == nil else { return }
+    attributionTask = Task { @MainActor [weak self] in
+      guard let self else { return }
+      defer { if generation == token { attributionTask = nil } }
+      do {
+        let (data, response) = try await session.data(from: attribution.combinedMarkDarkURL)
+        guard enabled, !suspended, generation == token, !Task.isCancelled,
+          (response as? HTTPURLResponse)?.statusCode == 200, data.count < 262144,
+          let mark = NSImage(data: data), mark.size.height > 0
+        else { return }
+        let ratio = mark.size.width / mark.size.height
+        mark.size = NSSize(width: 16 * ratio, height: 16)
+        mark.isTemplate = true
+        attributionMark = mark
+        changed()
+      } catch { /* Keep the successful Apple reading and the visible textual attribution. */  }
+    }
+  }
+
+  private func startNetworkMonitor() {
+    guard enabled, !suspended, networkMonitor == nil else { return }
+    let monitor = NWPathMonitor()
+    networkMonitor = monitor
+    var reachable = false
+    monitor.pathUpdateHandler = { [weak self, weak monitor] path in
+      let recovered = path.status == .satisfied && !reachable
+      reachable = path.status == .satisfied
+      guard recovered else { return }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak monitor] in
+        guard let self, let monitor, enabled, !suspended, networkMonitor === monitor else { return }
+        // Wi-Fi and WeatherKit often become ready after the display wakes.
+        refresh(force: true)
+      }
+    }
+    monitor.start(queue: DispatchQueue(label: "Atmos.WeatherNetwork"))
+  }
+
   private func resolveName(_ location: CLLocation) {
     let token = generation
     let rounded = CLLocation(
-      latitude: (location.coordinate.latitude * 100).rounded() / 100,
-      longitude: (location.coordinate.longitude * 100).rounded() / 100)
+      latitude: (location.coordinate.latitude * 1000).rounded() / 1000,
+      longitude: (location.coordinate.longitude * 1000).rounded() / 1000)
     geocoder.cancelGeocode()
     geocoder.reverseGeocodeLocation(rounded) { [weak self] places, _ in
       guard let self, enabled, !suspended, generation == token, let place = places?.first else {
         return
       }
-      let components = [
-        place.locality ?? place.subAdministrativeArea, place.administrativeArea, place.country,
-      ].compactMap { $0 }
-      var unique: [String] = []
-      for component in components where !unique.contains(component) { unique.append(component) }
-      if !unique.isEmpty {
-        locationName = unique.joined(separator: ", ")
+      if let name = LocationPresentation.name(
+        district: place.subLocality,
+        city: place.locality ?? place.subAdministrativeArea, region: place.administrativeArea,
+        country: place.country)
+      {
+        locationName = name
         changed()
       }
     }
@@ -279,13 +343,15 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     failures += 1
     status = message
     changed()
-    schedule(after: failures == 1 ? 60 : failures == 2 ? 300 : 900)
+    schedule(after: recovery.failureDelay(failures))
   }
 
   private func schedule(after interval: TimeInterval) {
     timer?.invalidate()
     guard enabled, !suspended else { return }
-    let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in self?.refresh() }
+    let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
+      self?.refresh(force: true)
+    }
     timer.tolerance = min(30, interval * 0.1)
     RunLoop.main.add(timer, forMode: .common)
     self.timer = timer
@@ -298,17 +364,26 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
       guard let self, enabled, !suspended, current == nil else { return }
       self.snapshot = nil
-      status = "Weather is out of date — using your manual mode"
+      status = "Updating weather after a long pause…"
       changed()
+      refresh(force: true)
     }
     RunLoop.main.add(timer, forMode: .common)
     expiryTimer = timer
   }
 
-  private func cancel() {
+  private func cancelRequest() {
     generation += 1
     task?.cancel()
     task = nil
+    attributionTask?.cancel()
+    attributionTask = nil
+  }
+
+  private func cancel() {
+    cancelRequest()
+    networkMonitor?.cancel()
+    networkMonitor = nil
     timer?.invalidate()
     locationTimeout?.invalidate()
     expiryTimer?.invalidate()

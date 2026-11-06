@@ -53,6 +53,7 @@ enum AppleWeather {
       precipitation: current.precipitationIntensity.converted(to: .metersPerSecond).value
         * 3_600_000,
       isDay: current.isDaylight ? 1 : 0)
+    snapshot.windGust = current.wind.gust?.converted(to: .kilometersPerHour).value
     snapshot.humidity = current.humidity * 100
     snapshot.cloudCover = current.cloudCover * 100
     snapshot.apparentTemperature = current.apparentTemperature.converted(to: .celsius).value
@@ -70,7 +71,8 @@ enum AppleWeather {
   static func mapping(_ condition: WeatherCondition) -> (code: Int, effect: WeatherEffect?) {
     switch condition {
     case .blizzard, .blowingSnow, .heavySnow: return (75, .snow)
-    case .blowingDust, .breezy, .windy: return (0, .leaves)
+    case .blowingDust: return (45, .mist)
+    case .breezy, .windy: return (0, nil)
     case .clear, .hot, .frigid: return (0, nil)
     case .cloudy, .mostlyCloudy: return (3, .clouds)
     case .partlyCloudy: return (2, nil)

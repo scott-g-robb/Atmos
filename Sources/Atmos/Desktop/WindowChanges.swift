@@ -4,6 +4,7 @@ import AppKit
 /// new windows. Sharing one subscription avoids repeated IPC on every display tick.
 final class WindowChanges {
   static let shared = WindowChanges()
+  static let notification = Notification.Name("AtmosWindowGeometryDidChange")
   private(set) var revision: UInt64 = 0
   private(set) var available = false
   private let lock = NSLock()
@@ -26,6 +27,7 @@ final class WindowChanges {
     }
     DispatchQueue.main.async {
       owner.revision &+= 1
+      NotificationCenter.default.post(name: WindowChanges.notification, object: nil)
       #if DEBUG
         if DebugMetrics.enabled { DebugMetrics.windowEvents += 1 }
       #endif

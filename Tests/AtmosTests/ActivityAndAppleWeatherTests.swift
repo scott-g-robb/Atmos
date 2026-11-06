@@ -29,7 +29,7 @@ final class ActivityAndAppleWeatherTests: XCTestCase {
     }
     XCTAssertEqual(AppleWeather.mapping(.wintryMix).effect, .sleet)
     XCTAssertEqual(AppleWeather.mapping(.blizzard).effect, .snow)
-    XCTAssertEqual(AppleWeather.mapping(.breezy).effect, .leaves)
+    XCTAssertNil(AppleWeather.mapping(.breezy).effect)
     XCTAssertEqual(AppleWeather.mapping(.foggy).effect, .mist)
     XCTAssertEqual(AppleWeather.mapping(.hurricane).effect, .storm)
   }
@@ -79,7 +79,7 @@ final class ActivityAndAppleWeatherTests: XCTestCase {
     XCTAssertEqual(reading.snapshot.cloudCover, 30)
     XCTAssertEqual(reading.snapshot.humidity, 80)
     let scene = WeatherScene(weather: reading.snapshot)
-    XCTAssertEqual(scene.primary, .fireflies)
+    XCTAssertEqual(scene.primary, .none)
     XCTAssertGreaterThan(scene.clouds, 0)
     XCTAssertEqual(reading.attribution.legalPageURL.host, "developer.apple.com")
     XCTAssertThrowsError(try AppleWeatherREST.decode(data, at: date.addingTimeInterval(8000)))

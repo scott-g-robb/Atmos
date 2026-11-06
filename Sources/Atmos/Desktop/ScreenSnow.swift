@@ -11,6 +11,7 @@ final class ScreenSnow {
   private let renderer: Renderer
   private let reflection: ScreenReflection
   private var placementTimer: Timer?
+  private var coveredGeometryCheck: CFTimeInterval = -1
   private var automaticallyBehind = false
   private let occlusionMask = WindowOcclusionMask()
   private var topWindowIDs = Set<CGWindowID>()
@@ -85,13 +86,6 @@ final class ScreenSnow {
   private static let fadeOut: CGFloat = 0.15
   /// Picked in Mission Control or switched to, a full-screen app zooms in from where it was: the snow goes with it.
   private static let giveWay: CGFloat = 0.4
-  var halloween = false {
-    didSet {
-      light.halloween = halloween
-      light.invalidate()
-      simulation.halloween = halloween
-    }
-  }
   var autumn: Bool {
     get { simulation.autumn }
     set { simulation.autumn = newValue }
@@ -105,8 +99,10 @@ final class ScreenSnow {
   }
 
   func setScene(_ scene: WeatherScene) {
-    setEffect(scene.primary)
-    renderer.weather.scene = scene
+    effect = scene.primary
+    renderer.setScene(scene, calm: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+    startPlacementWatcher()
+    wake()
   }
 
   func setIntensity(_ intensity: Snowfall) {
@@ -116,24 +112,33 @@ final class ScreenSnow {
   }
 
   func setAccumulation(_ on: Bool) {
-    simulation.accumulates = on
-    renderer.weather.accumulates = on
+    renderer.configureLayers {
+      $0.accumulates = on
+      $1.accumulates = on
+    }
     wake()
   }
 
   func setEvaporation(_ on: Bool) {
-    simulation.thaws = on
-    renderer.weather.evaporates = on
+    renderer.configureLayers {
+      $0.thaws = on
+      $1.evaporates = on
+    }
     wake()
   }
 
-  func setWind(_ wind: Float) {
-    simulation.weatherWind = wind
-    renderer.weather.wind = wind
+  func setWind(_ wind: Float, automatic:Bool=false) {
+    renderer.configureLayers {
+      $0.weatherWind = wind
+      $1.wind = wind
+      $1.manualWind = !automatic
+    }
   }
 
   func accessibilityChanged() {
-    renderer.weather.reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    renderer.configureLayers { _, weather in
+      weather.reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
   }
 
   func setBehindWindows(_ behind: Bool) {
@@ -198,7 +203,9 @@ final class ScreenSnow {
     renderer.weather.intensity = Preferences.snowfall
     renderer.weather.accumulates = Preferences.accumulate
     renderer.weather.evaporates = Preferences.meltSnow
-    renderer.weather.reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    renderer.configureLayers { _, weather in
+      weather.reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
     window = OverlayWindow(screen: screen)
     window.behindWindows = Preferences.behindWindows
     window.showsInScreenshots = Preferences.showInScreenshots
@@ -243,7 +250,7 @@ final class ScreenSnow {
         active: renderer.hasWater && active && !asleep && !covered,
         windows: tracker.reflectionWindows)
       renderer.reflectionFrame = reflection.displayedFrame
-      return (light.light, light.shadowTint, light.rim, light.lantern)
+      return (light.light, light.shadowTint, light.rim)
     }
     renderer.prepareReflection = { [unowned self] command in reflection.prepare(into: command) }
     renderer.rest = { [unowned self] in
@@ -313,8 +320,10 @@ final class ScreenSnow {
 
   func apply(_ budget: PowerBudget) {
     renderer.budget = budget
-    simulation.density = budget == .saver ? 0.75 : 1
-    renderer.weather.density = budget == .saver ? 0.65 : 1
+    renderer.configureLayers {
+      $0.density = budget == .saver ? 0.75 : 1
+      $1.density = budget == .saver ? 0.65 : 1
+    }
     reflection.maximumWidth = budget == .full ? 1280 : budget == .battery ? 1024 : 768
   }
 
@@ -409,13 +418,12 @@ final class ScreenSnow {
         fullScreenSpaces = spaces
       }
     }
-    if fullScreenCurrent && now - exposedSeenAt >= 1.0 / 30 {
+    if now - exposedSeenAt >= 0.15 {
       exposedSeenAt = now
+      let previouslyCovered = covered
       checkCovered()
-      if covered {
-        activityChanged()
-        return
-      }
+      if covered != previouslyCovered { activityChanged() }
+      if covered { return }
     }
     let canSlide = !(fullScreenSpaces ?? []).isEmpty
     // Untracked, the window list is read only while there is a full-screen app here to swipe to.
@@ -445,7 +453,10 @@ final class ScreenSnow {
     let now = CACurrentMediaTime()
     let was = covered
     let wasFullScreen = fullScreenCurrent
-    fullScreenCurrent = !overFullScreen && Spaces.fullScreen(on: displayID)?.showing ?? false
+    fullScreenCurrent =
+      !overFullScreen
+      && ((Spaces.fullScreen(on: displayID)?.showing ?? false)
+        || tracker.geometryShowsFullScreen(now: now))
     if fullScreenCurrent && !wasFullScreen && !was { coverAfter = now + 0.2 }
     exposed = fullScreenCurrent && (now < coverAfter || tracker.missionControlShows(now: now))
     covered = fullScreenCurrent && !exposed
@@ -568,9 +579,25 @@ final class ScreenSnow {
     dock.window.holdInPlace()
   }
 
+  func windowGeometryChanged() {
+    guard covered, !asleep else { return }
+    let now = CACurrentMediaTime()
+    guard now - coveredGeometryCheck > 0.15 else { return }
+    coveredGeometryCheck = now
+    checkCovered()
+    activityChanged()
+  }
+
   func watchWindows() {
     checkCovered()
     tracker.watchClosely(now: CACurrentMediaTime())
+    for delay in [0.25, 0.75, 1.4] {
+      DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        guard let self, !asleep else { return }
+        checkCovered()
+        activityChanged()
+      }
+    }
   }
 
   func close() {

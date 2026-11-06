@@ -27,12 +27,28 @@ final class WaterSurface {
   private let bed: [Float]
   private var horizontal: [Float]
   private var fluxScratch: [Float]
+  private var liquidImpulse: [SIMD2<Float>]
+  private var sustainedPressure=false
+  private(set) var foam: Float = 0
+  private(set) var foamCenter: Float = 0
+  private(set) var foamRadius: Float = 40
   private(set) var supportVelocity = SIMD2<Float>.zero
   private var lastMotionAt: Double = -1
   private(set) var outflow = SHWaterOutflow()
-  private(set) var detached: Float = 0
-  private(set) var detachedAt = SIMD2<Float>.zero
-  private(set) var detachedVelocity = SIMD2<Float>.zero
+  struct Release {
+    var amount: Float
+    var point: SIMD2<Float>
+    var velocity: SIMD2<Float>
+    var continuous=false
+  }
+  private var releaseStorage: [Release] = []
+  private var releaseHead = 0
+  var releases: ArraySlice<Release> { releaseStorage[releaseHead...] }
+  var detached: Float { releases.reduce(0) { $0 + $1.amount } }
+  var meanWorldVelocity: SIMD2<Float> {
+    let relative = zip(horizontal, depths).reduce(Float(0)) { $0 + $1.0 * $1.1 } / max(0.001, volume)
+    return supportVelocity + SIMD2(relative, 0)
+  }
   private(set) var heights: [Float]
   private(set) var top: Float = 0
   var isOccluded: Bool {
@@ -51,7 +67,7 @@ final class WaterSurface {
     self.origin = origin
     self.width = max(width, 1)
     self.blockers = blockers
-    limit = id == 0 ? 24 : 5
+    limit = id == 0 ? 24 : 5.85
     let count = max(3, Int(ceil(max(width, 1) / Self.spacing)) + 1)
     depths = Array(repeating: 0, count: count)
     waves = depths
@@ -60,6 +76,7 @@ final class WaterSurface {
     heights = depths
     horizontal = depths
     fluxScratch = depths
+    liquidImpulse = Array(repeating: .zero, count: count)
     bed = (0..<count).map { i in
       let x = Float(i) * Self.spacing
       return max(0.08, 0.32 + 0.28 * sin(x * 0.021 + Float(id % 17)) + 0.22 * sin(x * 0.057 + 1.7))
@@ -76,34 +93,67 @@ final class WaterSurface {
       return
     }
     let velocity = simd_clamp(shift / max(interval, 1 / 120), SIMD2(-1200, -900), SIMD2(1200, 900))
-    impart(velocity)
-    if velocity.y < -200 && volume > 0.1 {
-      detachedAt = origin + SIMD2(width / 2, top + 2)
-      detachedVelocity = SIMD2(0, 0)
-      detached += extract(
-        x: origin.x + width / 2, radius: width, fraction: min(0.75, -velocity.y / 1500))
-    }
+    impart(velocity, interval: interval)
     origin = point
     lastMotionAt = now
   }
 
   func settleMotion(now: Double) {
-    if now - lastMotionAt > 0.04 && supportVelocity != .zero { impart(.zero) }
+    if now - lastMotionAt > 0.04 && supportVelocity != .zero { impart(.zero, interval: Float(now - lastMotionAt)) }
   }
 
-  private func impart(_ velocity: SIMD2<Float>) {
+  private func impart(_ velocity: SIMD2<Float>, interval: Float) {
+    let dt = max(1 / 120, min(0.1, interval))
     let delta = velocity - supportVelocity
-    if delta.y < -200 && supportVelocity.y > 180 && volume > 0.1 {
-      detachedAt = origin + SIMD2(width / 2, top + 2)
-      let worldX =
-        supportVelocity.x + zip(horizontal, depths).reduce(Float(0)) { $0 + $1.0 * $1.1 }
-        / max(0.001, volume)
-      detachedVelocity = SIMD2(max(-650, min(650, worldX)), min(650, supportVelocity.y * 0.8))
-      detached += extract(
-        x: origin.x + width / 2, radius: width, fraction: min(0.65, -delta.y / 1600))
+    let acceleration = delta / dt
+    if simd_length(delta)>350 && volume>0.1 {foam = max(foam,min(1,(simd_length(delta)-300)/600))}
+    foamCenter=origin.x+width*0.5;foamRadius=width
+    // Loss of contact follows the normal force. Water leaves with its existing world
+    // momentum; slowing an upward window and accelerating it downward use the same rule.
+    let separating = max(0, -acceleration.y - 950)
+    if separating > 0 && volume > 0.001 {
+      cachedVolume = nil
+      // Detach the local fluid column, never a fixed number of evenly spaced drops.
+      // Neighbour pressure/cohesion subsequently keeps this fluid in sheets and ligaments.
+      for j in depths.indices {
+        let adhesion = 180 / max(0.3, depths[j])
+        let fraction = 1 - exp(-max(0, separating - adhesion) / 950 * dt * 8)
+        let mass = depths[j] * fraction
+        guard mass > 0.0001 else { continue }
+        let x = Float(j) / Float(depths.count - 1) * width
+        let height = max(0, depths[j] - bed[j] + waves[j])
+        let velocity = supportVelocity + SIMD2(horizontal[j], speeds[j])
+        depths[j] -= mass
+        liquidImpulse[j] = velocity
+        appendRelease(Release(amount: mass, point: origin + SIMD2(x, height * 0.5), velocity: velocity))
+      }
     }
     for i in horizontal.indices { horizontal[i] = max(-1200, min(1200, horizontal[i] - delta.x)) }
     supportVelocity = velocity
+  }
+
+  private func appendRelease(_ release: Release) {
+    // Compact only after a full queue's worth has been consumed, so a busy
+    // producer cannot turn alternating single pops/appends into quadratic work.
+    if releaseHead >= 2048 {
+      releaseStorage.removeFirst(releaseHead)
+      releaseHead = 0
+    }
+    if releases.count < 2048 { releaseStorage.append(release) }
+    else {
+      let i = releaseStorage.count - 1, total = releaseStorage[i].amount + release.amount
+      releaseStorage[i].point = (releaseStorage[i].point * releaseStorage[i].amount + release.point * release.amount) / total
+      releaseStorage[i].velocity = (releaseStorage[i].velocity * releaseStorage[i].amount + release.velocity * release.amount) / total
+      releaseStorage[i].amount = total
+    }
+  }
+  func consumeRelease() {
+    guard releaseHead < releaseStorage.count else { return }
+    releaseHead += 1
+    if releaseHead == releaseStorage.count {
+      releaseStorage.removeAll(keepingCapacity: true)
+      releaseHead = 0
+    }
   }
 
   func consumeOutflow(left: Bool) {
@@ -115,7 +165,6 @@ final class WaterSurface {
       outflow.right_momentum = 0
     }
   }
-  func consumeDetached() { detached = 0 }
 
   private var cachedVolume: Float? = 0
   var volume: Float {
@@ -137,38 +186,157 @@ final class WaterSurface {
     let index = min(depths.count - 2, max(1, Int((x - origin.x) / width * Float(depths.count - 1))))
     for j in max(0, index - 2)...min(depths.count - 1, index + 2) {
       let weight: Float = j == index ? 0.4 : abs(j - index) == 1 ? 0.22 : 0.08
-      depths[j] = min(limit, depths[j] + amount * weight)
+      depths[j] = id == 0 ? min(limit, depths[j] + amount * weight) : depths[j] + amount * weight
       speeds[j] = max(-8, min(8, speeds[j] + impulse * weight))
     }
   }
 
+  /// Match the rendered cubic waterline so floating material never snaps between columns.
   func depth(at x: Float) -> Float {
-    let i = min(depths.count - 1, max(0, Int((x - origin.x) / Self.spacing)))
-    return heights[i]
+    let column = max(
+      0, min(Float(heights.count - 1) - 0.0001, (x - origin.x) / width * Float(heights.count - 1)))
+    let i = Int(column)
+    let t = column - Float(i)
+    let a = heights[max(0, i - 1)]
+    let b = heights[i]
+    let c = heights[i + 1]
+    let d = heights[min(heights.count - 1, i + 2)]
+    let t2 = t * t
+    let t3 = t * t * t
+    let value =
+      0.5
+      * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3)
+    var result = max(max(0, min(b, c) - 0.2), min(max(b, c) + 0.2, value))
+    if origin.y > 0.5 {
+      let edge = min(x - origin.x, origin.x + width - x)
+      let t = max(0, min(1, edge / 10))
+      result *= t * t * (3 - 2 * t)
+    }
+    return result
+  }
+
+  /// Surface flow for buoyant material; support inertia and local slopes both contribute.
+  func current(at x: Float) -> Float {
+    let i = min(depths.count - 2, max(1, Int((x - origin.x) / Self.spacing)))
+    let slope = (heights[i + 1] - heights[i - 1]) / (2 * Self.spacing)
+    return max(-65, min(65, horizontal[i] * 0.12 - slope * 18))
   }
 
   /// Extract real volume for ballistic droplets. Never invent splash water.
   func extract(x: Float, radius: Float, fraction: Float) -> Float {
     cachedVolume = nil
     var amount: Float = 0
-    for i in depths.indices where abs(origin.x + Float(i) * Self.spacing - x) <= radius {
-      let taken = depths[i] * min(1, max(0, fraction))
+    guard let columns = columns(near: x, radius: radius) else { return 0 }
+    let fraction = min(1, max(0, fraction))
+    for i in columns where abs(origin.x + Float(i)/Float(depths.count-1)*width - x) <= radius {
+      let taken = depths[i] * fraction
       depths[i] -= taken
       amount += taken
     }
     return amount
   }
 
+  /// A solid circular collider excludes real fluid volume. The displaced volume
+  /// goes around its boundary; only collision momentum can lift it into free liquid.
+  @discardableResult
+  func collide(cursor: SIMD2<Float>, previous: SIMD2<Float>, velocity: SIMD2<Float>, dt: Float) -> Bool {
+    guard volume > 0.0001 else { return false }
+    let stroke = cursor - previous
+    let distance = simd_length(stroke)
+    let steps = min(100, max(1, Int(ceil(distance / 5))))
+    var touched = false
+    for step in 1...steps {
+      let centre = previous + stroke * (Float(step) / Float(steps))
+      let lower=max(0,Int(floor((centre.x-11-origin.x)/width*Float(depths.count-1))))
+      let upper=min(depths.count-1,Int(ceil((centre.x+11-origin.x)/width*Float(depths.count-1))))
+      guard lower<=upper else {continue}
+      for i in lower...upper {
+        let x = origin.x + Float(i) / Float(depths.count - 1) * width
+        let dx = x - centre.x, radius: Float = 11
+        guard abs(dx) < radius, accepts(x: x), depths[i] > 0.001 else { continue }
+        let half = sqrt(max(0, radius * radius - dx * dx))
+        let bottom = max(0, centre.y - half - origin.y)
+        guard centre.y + half > origin.y, depths[i] > bottom else { continue }
+        touched = true; cachedVolume = nil
+        let cap = max(bottom,centre.y + half - origin.y)
+        let above = max(0,depths[i]-cap)
+        if above > 0.001 {
+          // A height field cannot represent an overhang. Transfer just this upper
+          // layer to the free-liquid solver so it can flow OVER a submerged collider.
+          appendRelease(Release(amount:above,point:SIMD2(x,origin.y+cap+above*0.5),
+            velocity:supportVelocity+SIMD2(horizontal[i],speeds[i])))
+        }
+        let amount = max(0,min(depths[i],cap)-bottom)
+        let point = SIMD2(x, origin.y + max(bottom, depths[i]))
+        var normal = point - centre
+        normal /= max(0.001, simd_length(normal))
+        let closing = max(0, simd_dot(velocity, normal))
+        var impulse = normal * closing
+        // A downward impact compresses water against the supporting ledge. The
+        // displaced volume exits upward around the cursor rather than losing all
+        // entry energy because the top-surface normal faces against the stroke.
+        let down = max(0,-velocity.y)
+        let confinement = min(1,amount/max(1,half))
+        let rebound = down * sqrt(confinement) * 0.65
+        impulse.y = max(impulse.y,rebound)
+        impulse.x += (dx < 0 ? -1 : 1) * rebound * 0.25
+        if simd_length(velocity)>350 && centre.y<point.y && amount>0.15 && max(closing,rebound)>180 {foam = max(foam,min(1,(max(closing,rebound)-150)/450));foamCenter=x;foamRadius=35}
+        depths[i] = bottom
+        // Available kinetic energy versus the gravitational binding head.
+        if impulse.y > sqrt(2 * 950 * max(0.5, depths[i] + amount)) {
+          appendRelease(Release(amount: amount, point: centre + normal * radius,
+            velocity: supportVelocity + SIMD2(horizontal[i], speeds[i]) + impulse))
+        } else {
+          let side: Float = dx == 0 ? (velocity.x < 0 ? -1 : 1) : (dx < 0 ? -1 : 1)
+          let destinationX = centre.x + side * (radius + Self.spacing)
+          let j = max(0, min(depths.count - 1, Int(((destinationX-origin.x)/width*Float(depths.count-1)).rounded())))
+          depths[j] += amount
+          horizontal[j] += impulse.x * amount / max(0.01, depths[j])
+          speeds[j] += impulse.y * amount / max(0.01, depths[j])
+        }
+        for k in max(0,i-3)...min(depths.count-1,i+3) {
+          liquidImpulse[k] += impulse * (1-Float(abs(k-i))/4) / Float(steps)
+        }
+      }
+    }
+    return touched
+  }
+
+  func kick(x:Float,radius:Float,velocity:SIMD2<Float>,sustained:Bool=false) {
+    if sustained {sustainedPressure=true}
+    if simd_length(velocity)>350 {foam=max(foam,min(1,simd_length(velocity)/700));foamCenter=x;foamRadius=radius}
+    guard let columns = columns(near: x, radius: max(1, radius)) else { return }
+    for i in columns {
+      let px=origin.x+Float(i)/Float(depths.count-1)*width
+      let weight=max(0,1-abs(px-x)/max(1,radius))
+      liquidImpulse[i]+=velocity*weight
+    }
+  }
+
+  private func columns(near x: Float, radius: Float) -> ClosedRange<Int>? {
+    let scale = Float(depths.count - 1) / width
+    let lower = max(0, Int(floor((x - radius - origin.x) * scale)))
+    let upper = min(depths.count - 1, Int(ceil((x + radius - origin.x) * scale)))
+    return lower <= upper ? lower...upper : nil
+  }
+
+  func velocity(at x: Float) -> SIMD2<Float> {
+    let i = max(0,min(depths.count-1,Int((x-origin.x)/width*Float(depths.count-1))))
+    return supportVelocity + SIMD2(horizontal[i],speeds[i]) + liquidImpulse[i]
+  }
+
   func sweep(x: Float, velocity: Float, dt: Float) {
+    _ = collide(cursor: SIMD2(x,origin.y+1), previous: SIMD2(x-velocity*dt,origin.y+1),
+      velocity: SIMD2(velocity,0), dt: dt)
+  }
+
+  func releaseAll() {
     cachedVolume = nil
-    let i = min(depths.count - 2, max(1, Int((x - origin.x) / width * Float(depths.count - 1))))
-    let direction = velocity < 0 ? -1 : 1
-    for j in max(1, i - 2)...min(depths.count - 2, i + 2) {
-      let amount = min(depths[j] * 0.3, abs(velocity) * dt * 0.035)
-      depths[j] -= amount
-      let destination = min(depths.count - 1, max(0, j + direction * 3))
-      depths[destination] = min(limit, depths[destination] + amount)
-      speeds[j] = max(-8, min(8, speeds[j] + abs(velocity) * dt * 0.04))
+    for i in depths.indices where depths[i] > 0.0001 {
+      let x=origin.x+Float(i)/Float(depths.count-1)*width
+      appendRelease(Release(amount: depths[i], point: SIMD2(x,origin.y+max(0,depths[i]-bed[i])*0.5),
+        velocity: velocity(at:x)))
+      depths[i]=0
     }
   }
 
@@ -178,6 +346,28 @@ final class WaterSurface {
     guard volume > 0.0001 || top > 0.001 else { return }
     cachedVolume = nil
     let count = depths.count
+    foam *= exp(-dt * 6)
+    let pressureDecay = exp(-dt * 9)
+    var strongestPressure:Float=0
+    for i in liquidImpulse.indices {
+      liquidImpulse[i] *= pressureDecay
+      strongestPressure=max(strongestPressure,liquidImpulse[i].y)
+      let up=liquidImpulse[i].y,head=depths[i]
+      if sustainedPressure && head>0.03 && up>max(120,sqrt(2*950*head)) {
+        // A pressure impulse persists in the fluid field and feeds a continuous
+        // jet until its energy dissipates, instead of one isolated row of beads.
+        let energy=max(0,1-2*950*head/(up*up))
+        let fraction=min(0.2,energy*dt*6),mass=head*fraction
+        if mass>0.001 {
+          let x=origin.x+Float(i)/Float(depths.count-1)*width
+          appendRelease(Release(amount:mass,point:SIMD2(x,origin.y+max(0,head-bed[i])),
+            velocity:supportVelocity+SIMD2(horizontal[i],speeds[i])+liquidImpulse[i],continuous:true))
+          depths[i]-=mass
+          liquidImpulse[i] *= sqrt(max(0,1-fraction))
+        }
+      }
+    }
+    if strongestPressure<120 {sustainedPressure=false}
     if id != 0 {
       let spill = depths.withUnsafeMutableBufferPointer { d in
         horizontal.withUnsafeMutableBufferPointer { v in
@@ -185,7 +375,7 @@ final class WaterSurface {
             fluxScratch.withUnsafeMutableBufferPointer { momentum in
               sh_transport_water(
                 d.baseAddress, v.baseAddress, mass.baseAddress, momentum.baseAddress, count,
-                Self.spacing, dt)
+                Self.spacing, dt, limit)
             }
           }
         }
@@ -237,11 +427,11 @@ final class MistBank {
 
 /// Rust handles the per-particle integration, collisions and water solver without frame allocations.
 final class WeatherSimulation {
-  private static let capacity = 4096
+  private static let capacity = 8192
   private var storage: [WeatherParticle] = []
   private(set) var particleCount = 0
   var particles: ArraySlice<WeatherParticle> { storage.prefix(particleCount) }
-  private var impactStorage = [SHImpact](repeating: SHImpact(), count: 96)
+  private var impactStorage = [SHImpact](repeating: SHImpact(), count: 8192)
   private var coreSurfaces: [SHSurface] = []
   private var coreBlockers: [SIMD4<Float>] = []
   private(set) var water: [WaterSurface] = []
@@ -257,8 +447,20 @@ final class WeatherSimulation {
   private(set) var effect: WeatherEffect = .rain
   private(set) var smoke: SmokeSimulation?
   var scene = WeatherScene(primary: .rain)
+  private(set) var dynamics: WeatherDynamics?
+  var airflow: WindField?
+  private let birds = BirdFlock()
+  func updateDynamics(dt: Float) {
+    if let target = scene.dynamics {
+      dynamics = dynamics?.approach(target, dt: dt) ?? target
+      wind = dynamics!.wind(at: elapsed)
+    } else {
+      dynamics = nil
+    }
+  }
   private var secondaryEmitted: Float = 0
-  private var waterThrowBudget = 64
+  private var impactSplashBudget = 24
+  private var puddleSplashSamples: [CGWindowID:Int] = [:]
   private var nextStrike: Double = 4
   private var bolts: [WeatherParticle] = []
   private(set) var lastStrikeTarget: SIMD2<Float>?
@@ -269,6 +471,7 @@ final class WeatherSimulation {
   var accumulates = true
   var evaporates = true
   var wind: Float = 0
+  var manualWind = false
   var density: Float = 1
   var reducedMotion = false
   private var emitted: Float = 0
@@ -309,8 +512,11 @@ final class WeatherSimulation {
   }
 
   var isEmpty: Bool {
-    decorations.isEmpty && particleCount == 0 && (!ownsWater || !water.contains { $0.top > 0.01 })
-      && !banks.contains { $0.amount > 0.01 } && intensity == .off
+    decorations.isEmpty && particleCount == 0 && (!ownsWater || !water.contains {
+      $0.top > 0.01 || $0.detached > 0.001 || $0.outflow.left + $0.outflow.right > 0.02
+    })
+      && !banks.contains { $0.amount > 0.01 }
+      && (intensity == .off || (effect == .none && scene.clouds == 0 && scene.sunlight == 0))
   }
   var hasContent: Bool {
     !decorations.isEmpty || particleCount > 0 || (ownsWater && water.contains { $0.volume > 0.01 })
@@ -360,6 +566,7 @@ final class WeatherSimulation {
     scene = WeatherScene(primary: effect)
     smoke = nil
     bolts.removeAll()
+    birds.reset()
     nextStrike = elapsed + 4
     secondaryEmitted = 0
     particleCount = 0
@@ -397,7 +604,7 @@ final class WeatherSimulation {
     // Ground water is drawn below the actual Dock, with no rectangular cutout.
     next[0].blockers = []
     for surface in surfaces where onWindows {
-      let inset = Float(surface.cornerRadius * 0.5)
+      let inset = Float(surface.cornerRadius)
       let width = Float(surface.frame.width) - inset * 2
       guard width > 16 else { continue }
       let origin = SIMD2(Float(surface.frame.minX) + inset, Float(surface.frame.maxY))
@@ -430,12 +637,11 @@ final class WeatherSimulation {
       for oldSurface in water
       where oldSurface.id != 0 && !kept.contains(oldSurface.id) && oldSurface.volume > 1 {
         if !sliding && !elsewhere.contains(oldSurface.id) {
-          let amount = oldSurface.extract(
-            x: oldSurface.origin.x + oldSurface.width / 2, radius: oldSurface.width, fraction: 1)
-          throwWater(
-            amount: amount,
-            at: oldSurface.origin + SIMD2(oldSurface.width * 0.5, oldSurface.top + 2),
-            velocity: SIMD2(0, -30), count: 18, spread: oldSurface.width)
+          oldSurface.releaseAll()
+          while let release = oldSurface.releases.first, particleCount < Self.capacity - 32 {
+            appendLiquid(release)
+            oldSurface.consumeRelease()
+          }
         }
         windowSeenAt[oldSurface.id] = nil
       }
@@ -494,12 +700,14 @@ final class WeatherSimulation {
     // Match the original snow/leaf contact point, in local macOS points at every display scale.
     let cursor = cursor + SIMD2<Float>(4, -8)
     let dt = min(rawDT, 0.05)
-    waterThrowBudget = 64
+    impactSplashBudget = reducedMotion ? 8 : max(24,min(144,water.count*12))
+    puddleSplashSamples.removeAll(keepingCapacity:true)
     elapsed += Double(dt)
     if retiring { for i in 0..<particleCount { storage[i].life.x += dt * (retirementRate - 1) } }
     let clearing = elapsed < clearingUntil
+    updateDynamics(dt: dt)
     let displayIntensity = retiring ? retirementIntensity : intensity
-    let multiplier: Float =
+    let presetMultiplier: Float =
       switch displayIntensity {
       case .off: 0
       case .light: 0.5
@@ -507,6 +715,14 @@ final class WeatherSimulation {
       case .heavy: 1.65
       case .variable: 0.7 + 0.6 * Float(0.5 + 0.5 * sin(elapsed * 0.035))
       }
+    let multiplier: Float =
+      scene.dynamics != nil
+      ? (displayIntensity == .off
+        ? 0
+        : (effect.hasWater || effect == .snow || effect == .hail
+          ? dynamics?.precipitationStrength ?? 1 : 1))
+      : presetMultiplier
+    let layerStrength: Float = scene.dynamics != nil && !effect.isStacked ? 1 : scene.strength
     let area = min(8, size.x * size.y / 1_000_000)
     let slow: Float = reducedMotion ? 0.55 : 1
     let rate: Float =
@@ -520,6 +736,7 @@ final class WeatherSimulation {
       case .clouds: 0.20
       case .sunlight: 6
       case .fireflies: 0.65
+      case .butterflies: 0.18
       default: 0
       }
     if !retiring, !primed, multiplier > 0, rate > 0 {
@@ -529,11 +746,11 @@ final class WeatherSimulation {
         240,
         max(
           effect == .fireflies ? 8 : 4,
-          Int(rate * area * multiplier * density * scene.strength * prefill)))
+          Int(rate * area * multiplier * density * layerStrength * prefill)))
       for _ in 0..<count { append(makeParticle(initial: true)) }
     }
     if !retiring && !clearing {
-      emitted += rate * area * multiplier * density * scene.strength * slow * dt
+      emitted += rate * area * multiplier * density * layerStrength * slow * dt
       let count = min(40, Int(emitted))
       emitted -= Float(count)
       for _ in 0..<count where particleCount < Self.capacity - 128 {
@@ -565,7 +782,7 @@ final class WeatherSimulation {
       dt: dt, time: time, width: size.x, height: size.y, wind: wind,
       cursor_x: cursor.x, cursor_y: cursor.y, cursor_vx: velocity.x, cursor_vy: velocity.y,
       motion_scale: slow, previous_x: previous.x, previous_y: previous.y,
-      effect: effect == .storm || effect == .lightning ? 2 : 0,
+      effect: dynamics != nil || manualWind ? 1 : effect == .storm || effect == .lightning ? 2 : 0,
       surface_count: UInt32(coreSurfaces.count), blocker_count: UInt32(coreBlockers.count))
     if !ownsWater {
       synchroniseWater()
@@ -584,87 +801,60 @@ final class WeatherSimulation {
       }
     }
     particleCount = result.count
+    if let airflow, !airflow.cells.isEmpty {
+      storage.withUnsafeMutableBufferPointer { particles in
+        airflow.cells.withUnsafeBufferPointer { cells in
+          sh_apply_airflow(
+            particles.baseAddress, particleCount, cells.baseAddress, airflow.columns, airflow.rows,
+            airflow.spacing, wind, dt)
+        }
+      }
+    }
     for i in 0..<result.impact_count {
       let hit = impactStorage[i]
       guard Int(hit.surface_index) < water.count else { continue }
       let surface = water[Int(hit.surface_index)]
       if effect.hasWater && accumulates && !clearing {
         surface.hit(x: hit.x, amount: hit.amount, impulse: hit.impulse)
-        addRipple(at: SIMD2(hit.x, surface.origin.y), strength: 0.8)
-      }
-      if hit.kind != 5, i < 16 {
-        splash(
-          at: SIMD2(hit.x, hit.y),
-          count: reducedMotion ? 1 : hit.kind == 9 ? min(24, 6 + Int(hit.amount * 2)) : 3,
-          ice: hit.kind == 1, energy: hit.kind == 9 ? min(3, hit.impulse / 2) : 1)
+        addRipple(
+          at: SIMD2(hit.x, surface.origin.y), strength: min(1.7,0.35+abs(hit.impulse)*0.16))
+        if hit.kind==0 || hit.kind==9 {impactSplash(surface:surface,x:hit.x,velocity:SIMD2(hit.vx,hit.vy),amount:hit.amount)}
       }
     }
     if effect.hasWater && ownsWater {
       for surface in water {
-        let distance = simd_distance(previous, cursor)
-        let steps = min(160, max(1, Int(ceil(distance / 7))))
-        var contact: SIMD2<Float>?
-        if surface.top > 0.1 && speed > 8 {
-          for j in 0...steps {
-            let point = previous + (cursor - previous) * (Float(j) / Float(steps))
-            guard surface.accepts(x: point.x), point.y >= surface.origin.y - 12,
-              point.y <= surface.origin.y + surface.depth(at: point.x) + 12
-            else { continue }
-            let horizontal =
-              abs(velocity.x) > 15
-              ? velocity.x : (point.x < size.x / 2 ? -1 : 1) * max(80, abs(velocity.y) * 0.6)
-            surface.sweep(x: point.x, velocity: horizontal, dt: dt / Float(steps + 1))
-            surface.hit(x: point.x, amount: 0, impulse: min(7, speed * 0.014) / Float(steps + 1))
-            contact = point
-            interactive = true
-            if speed > 480 && waterThrowBudget > 0 && particleCount < Self.capacity - 64 {
-              let amount = surface.extract(
-                x: point.x, radius: 9, fraction: min(0.7, (speed - 350) / 1800))
-              let launch = SIMD2(
-                velocity.x * 0.48, max(100, min(650, abs(velocity.y) * 0.4 + speed * 0.18)))
-              throwWater(
-                amount: amount,
-                at: SIMD2(point.x, surface.origin.y + surface.depth(at: point.x) + 3),
-                velocity: launch, count: reducedMotion ? 2 : 5)
-            }
-          }
-        }
-        if let point = contact {
-          addRipple(at: SIMD2(point.x, surface.origin.y), strength: min(3, speed / 250 + 0.5))
-          if speed > 300 {
-            splash(
-              at: SIMD2(point.x, surface.origin.y + surface.depth(at: point.x)),
-              count: reducedMotion ? 2 : min(20, Int(speed / 100)), ice: false,
-              energy: min(3, speed / 500))
-          }
+        if surface.collide(cursor: cursor, previous: simd_distance(previous,cursor) < 400 ? previous : cursor,
+          velocity: velocity, dt: dt) {
+          interactive = true
+          if speed > 8 { addRipple(at: SIMD2(cursor.x,surface.origin.y), strength: min(3,speed/250)) }
         }
         surface.settleMotion(now: elapsed)
         let drying = retiring ? Self.waterDryingDuration - Float(elapsed - retirementAt) : nil
-        surface.step(
-          dt: dt, evaporates: retiring || evaporates || !accumulates,
-          clearing: clearing || !accumulates, decay: retirementRate, driesWithin: drying)
-        for left in [true, false] {
-          let amount = left ? surface.outflow.left : surface.outflow.right
-          let momentum = left ? surface.outflow.left_momentum : surface.outflow.right_momentum
-          if amount > 0.02, waterThrowBudget > 0, particleCount < Self.capacity - 32 {
-            let edge = surface.origin.x + (left ? -5 : surface.width + 5)
-            let point = SIMD2(edge, surface.origin.y + surface.top + 1)
-            throwWater(
-              amount: amount, at: point,
-              velocity: SIMD2(
-                max(-650, min(650, momentum / amount)),
-                min(650, max(0, surface.supportVelocity.y * 0.8))),
-              count: min(10, max(2, Int(amount * 2))), spread: 3)
-            surface.consumeOutflow(left: left)
+        surface.step(dt: dt, evaporates: retiring || evaporates || !accumulates,
+          clearing: clearing || !accumulates, decay: retirementRate * (dynamics?.evaporation ?? 1),
+          driesWithin: drying)
+        // Spend the available samples across this frame's releases, rather than
+        // letting an early column fill the pool and delaying the rest for seconds.
+        var pending=water.reduce(0) {$0+$1.releases.count}
+        if pending>0 && pending>Self.capacity-particleCount-64 {coalesceLiquid()}
+        while let release=surface.releases.first, particleCount<Self.capacity-32 {
+          let share=max(1,(Self.capacity-particleCount-32)/max(1,pending))
+          appendLiquid(release,maximum:share);surface.consumeRelease();pending-=1
+        }
+        for left in [true,false] {
+          let amount=left ? surface.outflow.left:surface.outflow.right
+          if amount>0.0001,particleCount<Self.capacity-32 {
+            let momentum=left ? surface.outflow.left_momentum:surface.outflow.right_momentum
+            let x=surface.origin.x+(left ? 0:surface.width)
+            appendLiquid(WaterSurface.Release(amount:amount,point:SIMD2(x,surface.origin.y+surface.depth(at:x)),
+              velocity:SIMD2(momentum/amount,surface.supportVelocity.y)))
+            surface.consumeOutflow(left:left)
           }
         }
-        if surface.detached > 0.02, waterThrowBudget > 0, particleCount < Self.capacity - 32 {
-          throwWater(
-            amount: surface.detached, at: surface.detachedAt, velocity: surface.detachedVelocity,
-            count: 18, spread: surface.width)
-          surface.consumeDetached()
-        }
       }
+    }
+    storage.withUnsafeMutableBufferPointer { p in
+      sh_couple_liquid(p.baseAddress, particleCount, dt, cursor.x,cursor.y,velocity.x,velocity.y)
     }
     for i in ripples.indices { ripples[i].age += dt }
     ripples.removeAll { $0.age > 1.5 }
@@ -714,10 +904,19 @@ final class WeatherSimulation {
   private func updateDecorations(dt: Float, multiplier: Float, clearing: Bool) {
     decorations.removeAll(keepingCapacity: true)
     stormDecorations(dt: dt, multiplier: multiplier, clearing: clearing)
+    if effect == .birds {
+      birds.step(
+        dt: dt, size: size, surfaces: surfaces, wind: wind, airflow: airflow,
+        cursor: SIMD2(interaction.x, interaction.y),
+        active: !retiring && !clearing && multiplier > 0, reducedMotion: reducedMotion)
+      decorations.append(contentsOf: birds.particles)
+    }
     if effect == .mist || effect == .clouds {
       for bank in banks {
         let target: Float =
-          !retiring && !clearing && accumulates && multiplier > 0 ? min(1.2, 0.8 * multiplier) : 0
+          !retiring && !clearing && accumulates && multiplier > 0
+          ? min(1.2, 0.8 * multiplier)
+            * (dynamics.map { effect == .mist ? 0.5 + $0.haze * 0.7 : $0.cloudCover } ?? 1) : 0
         bank.amount +=
           (target - bank.amount)
           * min(
@@ -735,7 +934,9 @@ final class WeatherSimulation {
             life: SIMD4(2, 10000, Float(bank.id), effect == .mist ? 0 : 1)))
       }
     }
-    if (effect == .sunlight || scene.sunlight > 0) && multiplier > 0 && !clearing {
+    if (effect == .sunlight || scene.sunlight > 0) && multiplier > 0 && !clearing
+      && (dynamics == nil || scene.sunlight > 0.001)
+    {
       for i in 0..<2 {
         let x = size.x * (0.14 + Float(i) * 0.16) + sin(time * 0.035 + Float(i)) * 12
         decorations.append(
@@ -743,7 +944,9 @@ final class WeatherSimulation {
             rect: SIMD4(
               x, size.y * 0.63, (75 + Float(i) * 22) * min(1.5, multiplier), size.y * 0.88),
             motion: SIMD4(0.32, -1, Float(i) * 0.31, 8),
-            color: SIMD4(1, 0.84, 0.42, 0.16 * (effect == .sunlight ? 1 : scene.sunlight)),
+            color: SIMD4(
+              1, 0.84, 0.42,
+              0.16 * (dynamics != nil ? scene.sunlight : effect == .sunlight ? 1 : scene.sunlight)),
             life: SIMD4(2, 10000, 0, 0)))
       }
     }
@@ -751,9 +954,12 @@ final class WeatherSimulation {
 
   private func stormDecorations(dt: Float, multiplier: Float, clearing: Bool) {
     let storm = effect == .storm || effect == .lightning
-    let cover: Float = storm ? 1 : effect == .clouds ? 0.65 : scene.clouds
+    let cover: Float =
+      dynamics != nil
+      ? (scene.clouds > 0 || storm || effect == .clouds ? dynamics!.cloudCover : 0)
+      : storm ? 1 : effect == .clouds ? 0.65 : scene.clouds
     if cover > 0 && multiplier > 0 && !clearing {
-      let height = min(size.y * 0.25, storm ? 180 : 100) * (0.65 + 0.35 * cover)
+      let height = min(size.y * 0.35, storm ? 220 : 90 + cover * 130) * (0.65 + 0.35 * cover)
       decorations.append(
         WeatherParticle(
           rect: SIMD4(size.x * 0.5, size.y - height * 0.35, size.x * 1.1, height * 1.5),
@@ -783,6 +989,8 @@ final class WeatherSimulation {
           break
         }
       }
+      let struckPool=water.first {abs($0.origin.y-target.y)<4 && $0.accepts(x:target.x)}
+      if let pool=struckPool {target.y=pool.origin.y+pool.depth(at:target.x)}
       lastStrikeTarget = target
       let start = SIMD2(
         min(size.x - 15, max(15, target.x + range(-180, 180))), size.y - range(35, 65))
@@ -799,10 +1007,10 @@ final class WeatherSimulation {
         previous = end
       }
       flash = 0.6
-      if let pool = water.first(where: {
-        abs($0.origin.y - target.y) < 4 && $0.accepts(x: target.x)
-      }) {
-        addRipple(at: SIMD2(target.x, pool.origin.y), strength: 2)
+      if let pool=struckPool {
+        addRipple(at:SIMD2(target.x,pool.origin.y),strength:2)
+        pool.hit(x:target.x,amount:0,impulse:8)
+        lightningSplash(surface:pool,x:target.x)
       }
     }
     decorations.append(contentsOf: bolts)
@@ -845,6 +1053,14 @@ final class WeatherSimulation {
         motion: SIMD4(range(-5, 8), range(-1, 1), unit(), 2),
         color: SIMD4(0.86, 0.9, 0.97, mist ? 0.55 : 0.58),
         life: SIMD4(initial ? range(1, 7) : 0, range(20, 34), background, mist ? 0 : 1))
+    case .butterflies:
+      let diameter = range(17, 28)
+      return WeatherParticle(
+        rect: SIMD4(
+          range(20, size.x - 20), range(size.y * 0.2, size.y * 0.85), diameter, diameter * 0.85),
+        motion: SIMD4(range(-30, 30), range(-12, 12), unit(), 13),
+        color: unit() < 0.5 ? SIMD4(1, 0.58, 0.17, 0.96) : SIMD4(0.55, 0.72, 1, 0.96),
+        life: SIMD4(initial ? 1 : 0, range(18, 30), 0, 0))
     case .sunlight, .fireflies:
       let firefly = effect == .fireflies
       let diameter = range(firefly ? 13 : 6, firefly ? 21 : 10)
@@ -863,47 +1079,49 @@ final class WeatherSimulation {
 
   private func drop(at point: SIMD2<Float>, splash: Bool) -> WeatherParticle {
     let drizzle = effect == .drizzle
-    let speed = range(
-      drizzle ? 290 : 650, (effect == .storm || effect == .lightning) ? 1200 : drizzle ? 470 : 930)
+    let speed: Float
+    if let dynamics {
+      speed = dynamics.fallSpeed * range(0.82, 1.16)
+    } else {
+      speed = range(
+        drizzle ? 290 : 650, (effect == .storm || effect == .lightning) ? 1200 : drizzle ? 470 : 930
+      )
+    }
     return WeatherParticle(
       rect: SIMD4(
         point.x, point.y,
         splash ? range(2.2, 3.2) : range(drizzle ? 2.2 : 2.7, drizzle ? 2.8 : 3.8),
         splash ? range(3, 6) : speed * (drizzle ? 0.024 : 0.029)),
       motion: SIMD4(
-        splash ? range(-110, 110) : wind + (effect == .storm || effect == .lightning ? 80 : 12),
+        splash ? range(-110, 110) : wind + ((manualWind || dynamics != nil) ? 0 : (effect == .storm || effect == .lightning ? 80 : 12)),
         splash ? range(50, 160) : -speed, unit(), splash ? 5 : 0),
       color: SIMD4(0.74, 0.86, 0.97, splash ? 0.7 : range(0.65, 0.88)),
       life: SIMD4(0, splash ? range(0.35, 0.7) : 16, 0, 0))
   }
 
-  private func splash(at point: SIMD2<Float>, count: Int, ice: Bool, energy: Float = 1) {
-    for _ in 0..<count where particleCount < Self.capacity - 128 {
-      var p = drop(at: point + SIMD2(0, 2), splash: true)
-      p.motion.x *= energy
-      p.motion.y *= energy
-      p.life.y = max(p.life.y, p.motion.y / 475 + 0.15)
-      if ice { p.color = SIMD4(0.88, 0.95, 1, 0.7) }
-      append(p)
+  /// Merge nearby old samples only under pressure, preserving mass and momentum.
+  private func coalesceLiquid() {
+    particleCount = storage.withUnsafeMutableBufferPointer { particles in
+      sh_coalesce_liquid(particles.baseAddress, particleCount)
     }
   }
 
-  private func throwWater(
-    amount: Float, at point: SIMD2<Float>, velocity: SIMD2<Float>, count: Int, spread: Float = 12
-  ) {
-    guard amount > 0.02 else { return }
-    let count = min(count, max(1, Int(amount * 2)), Self.capacity - particleCount, waterThrowBudget)
-    guard count > 0 else { return }
-    waterThrowBudget -= count
-    for i in 0..<count {
-      let mass = amount / Float(count)
-      let diameter = min(11, max(3, sqrt(mass) * 3))
-      let x = point.x + (Float(i) / Float(max(1, count - 1)) - 0.5) * spread
-      append(
-        WeatherParticle(
-          rect: SIMD4(x, point.y, diameter, diameter * 1.3),
-          motion: SIMD4(velocity.x + range(-65, 65), velocity.y + range(0, 95), unit(), 9),
-          color: SIMD4(0.70, 0.85, 0.97, 0.9), life: SIMD4(0, 14, mass, 0)))
+  private func appendLiquid(_ release: WaterSurface.Release, maximum: Int = 128) {
+    guard release.amount > 0.0001, particleCount < Self.capacity else { return }
+    // Pixel-scale fluid parcels represent the same conserved volume. Dense small
+    // samples reconstruct thin ligaments instead of rendering one large glass ball.
+    let count=min(maximum,max(1,Int(ceil(release.amount/0.08))),Self.capacity-particleCount)
+    let mass=release.amount/Float(count)
+    let diameter=max(0.75,min(1.8,sqrt(mass)*2.3))
+    let phase=unit()*2*Float.pi
+    for k in 0..<count {
+      let angle=phase+Float(k)*2.3999632
+      let radius=sqrt((Float(k)+0.5)/Float(count))*max(0.6,sqrt(Float(count))*0.42)
+      let point=release.point+SIMD2(cos(angle),sin(angle))*radius
+      append(WeatherParticle(rect:SIMD4(point.x,point.y,diameter,diameter),
+        motion:SIMD4(release.velocity.x,release.velocity.y,release.continuous ? -max(0.001,phase/(2*Float.pi)) : phase/(2*Float.pi),9),
+        color:SIMD4(point.x,point.y,diameter*0.5,0.9),
+        life:SIMD4(0,14,mass,0)))
     }
   }
 
@@ -917,10 +1135,77 @@ final class WeatherSimulation {
   }
 
   private func addRipple(at point: SIMD2<Float>, strength: Float) {
-    if ripples.count == 32 { ripples.removeFirst() }
-    // Coalesce impacts at the same spot rather than making the shader loop over redundant rings.
-    if let last = ripples.last, last.age < 0.08, simd_distance(last.point, point) < 12 { return }
-    ripples.append(WaterRipple(point: point, age: 0, strength: strength))
+    if let i=ripples.indices.first(where: {ripples[$0].age<0.1 && simd_distance(ripples[$0].point,point)<24}) {
+      let old=ripples[i].strength,total=old+strength
+      ripples[i].point=(ripples[i].point*old+point*strength)/max(0.001,total)
+      ripples[i].strength=min(1.7,sqrt(old*old+strength*strength))
+      return // Preserve age: repeated rain cannot restart a white point every frame.
+    }
+    if ripples.count==32 {
+      guard let i=ripples.indices.min(by:{ripples[$0].strength*exp(-ripples[$0].age*4)<ripples[$1].strength*exp(-ripples[$1].age*4)}),ripples[i].age>0.2 else {return}
+      ripples.remove(at:i)
+    }
+    ripples.append(WaterRipple(point:point,age:0,strength:min(1.7,strength)))
+  }
+
+  /// Transfer a bounded amount of existing water into an impact crown. Energy sets
+  /// launch velocity; no extra water is invented, and large lightning hits scale up.
+  func impactSplash(surface:WaterSurface,x:Float,velocity:SIMD2<Float>,amount:Float) {
+    let speed=abs(velocity.y),remaining=puddleSplashSamples[surface.id] ?? (reducedMotion ? 4:12)
+    guard speed>250,surface.depth(at:x)>0.12,remaining>=2,impactSplashBudget>=2,particleCount<Self.capacity-64 else {return}
+    let samples=min(6,remaining/2,impactSplashBudget/2)
+    let radius=min(14,max(4,speed*0.007))
+    let volume=surface.extract(x:x,radius:radius,fraction:min(surface.id==0 ? 0.08:0.14,amount*speed/18000))
+    guard volume>0.0001 else {return}
+    puddleSplashSamples[surface.id]=remaining-samples*2;impactSplashBudget-=samples*2
+    let rise=min(500,speed*0.23),waterVelocity=surface.velocity(at:x)
+    surface.kick(x:x,radius:radius,velocity:SIMD2(0,rise*0.3*min(1,amount/4)))
+    // Mostly vertical rain creates mostly vertical ejecta. The incoming drop carries
+    // wind momentum; the impact's radial spread is only a small crown component.
+    let carriedX=velocity.x*0.8+waterVelocity.x*0.2
+    for side:Float in [-1,1] {
+      appendLiquid(WaterSurface.Release(amount:volume*0.5,
+        point:SIMD2(x+side*radius*0.25,surface.origin.y+surface.depth(at:x)+0.6),
+        velocity:SIMD2(carriedX+side*rise*0.08,waterVelocity.y*0.2+rise)),maximum:samples)
+    }
+  }
+
+  func lightningSplash(surface:WaterSurface,x:Float) {
+    guard surface.volume>0.1 else {return}
+    if Self.capacity-particleCount<512 {coalesceLiquid()}
+    let budget=min(512,Self.capacity-particleCount-32)
+    guard budget>0 else {return}
+    let depth=surface.depth(at:x),radius=min(70,max(20,16+depth*3))
+    let columns=surface.depths.indices.filter {
+      let px=surface.origin.x+Float($0)/Float(surface.depths.count-1)*surface.width
+      return abs(px-x)<radius && surface.accepts(x:px) && surface.depth(at:px)>0.12
+    }
+    guard !columns.isEmpty else {return}
+    let rise=sqrt(2*950*min(size.y*0.45,180+depth*20))
+    let samples=max(1,budget/columns.count)
+    for column in columns {
+      let px=surface.origin.x+Float(column)/Float(surface.depths.count-1)*surface.width
+      let r=(px-x)/radius,weight=max(0,1-r*r)
+      let line=surface.origin.y+surface.depth(at:px)
+      let mass=surface.extract(x:px,radius:surface.width/Float(surface.depths.count-1)*0.45,fraction:0.55*weight)
+      let v=surface.velocity(at:px)
+      let first=particleCount
+      appendLiquid(WaterSurface.Release(amount:mass,point:SIMD2(px,line+0.8),
+        velocity:v+SIMD2(r*rise*0.32,rise*sqrt(max(0.12,weight)))),maximum:samples)
+      let extent=max(0.6,sqrt(Float(particleCount-first))*0.42)
+      for i in first..<particleCount {
+        // Sample the actual removed layer, rather than collapsing its full depth
+        // into a row of identical droplets. Pressure varies continuously over the
+        // layer and across the impact, allowing curtains and ligaments to stretch.
+        let z=max(0,min(1,0.5+(storage[i].rect.y-(line+0.8))/(2*extent)))
+        storage[i].rect.y=line-mass+z*mass
+        let localR=(storage[i].rect.x-x)/radius
+        storage[i].motion.x=v.x+localR*rise*0.20
+        storage[i].motion.y=v.y+rise*sqrt(max(0.12,1-localR*localR))*sqrt(0.35+0.65*z)
+        storage[i].life.w=0.7*weight
+      }
+    }
+    surface.kick(x:x,radius:radius,velocity:SIMD2(0,rise*0.9),sustained:true)
   }
 
   private func unit() -> Float {

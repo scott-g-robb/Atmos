@@ -49,10 +49,10 @@ let referenceWeatherShaderSource = """
       out.color=float4(p.color.rgb*mix(float3(1),u.light.rgb,0.18),p.color.a*fade*u.opacity);
       out.seed=p.motion.z;out.kind=p.motion.w;out.life=p.life.xy;out.style=p.life.w;return out;
   }
-  fragment float4 weatherFragment(WeatherOut in [[stage_in]],constant WeatherUniforms &u [[buffer(1)]], constant float4 *blockers [[buffer(3)]],constant float4 *smoke [[buffer(4)]]) {
+  fragment float4 weatherFragment(WeatherOut in [[stage_in]],constant WeatherUniforms &u [[buffer(1)]], constant float4 *blockers [[buffer(3)]],constant float4 *smoke [[buffer(4)]],texture2d<float> scene [[texture(0)]]) {
       if(in.world.y>=u.screen.z)discard_fragment();
       float2 p=in.uv*2.0-1.0;float radius=length(p);float alpha=in.color.a;float3 color=in.color.rgb;
-      if(in.kind<0.5 || (in.kind>4.5 && in.kind<5.5)) {
+      if(in.kind<0.5) {
           float end=pow(saturate(1.0-abs(p.y)),0.35);float taper=0.4+0.6*in.uv.y;
           float edge=exp(-p.x*p.x*3.0)*end*taper;
           float core=exp(-p.x*p.x*32.0)*end*taper;
@@ -96,9 +96,20 @@ let referenceWeatherShaderSource = """
           // A soft underside keeps pale smoke readable on white without a hard outline.
           return float4(rgb,a);
       }
-      if(in.kind==9.0) {
-          float shape=1-smoothstep(0.65,1.0,radius);float core=exp(-dot(p-float2(-0.25,0.25),p-float2(-0.25,0.25))*24.0);
-          return weatherInk(mix(color,float3(1),core),shape*alpha*(0.62+core*0.38),shape*alpha*0.65);
+      if(in.kind==9.0 || in.kind==5.0) {
+          float shape=1-smoothstep(0.72,1.0,radius);
+          float3 normal=float3(p*0.8,sqrt(max(0.0,1.0-dot(p,p)*0.64)));
+          float2 uv=float2(in.world.x,u.screen.y-in.world.y)/u.screen.xy;
+          uv+=normal.xy*float2(0.018,-0.03);
+          uv=u.reflectionRect.xy+uv*u.reflectionRect.zw;
+          constexpr sampler waterSample(coord::normalized,address::clamp_to_edge,filter::linear);
+          float3 reflected=scene.sample(waterSample,uv).rgb;
+          float fresnel=0.12+0.65*pow(1-normal.z,3.0);
+          float glint=exp(-dot(p-float2(-0.28,0.3),p-float2(-0.28,0.3))*38.0);
+          float3 water=mix(reflected,float3(0.12,0.21,0.28),0.12);
+          water+=float3(0.7,0.87,1)*(glint*0.55+fresnel*0.22);
+          float a=shape*alpha*(0.72+fresnel*0.24);
+          return float4(water*a,a);
       }
       if(in.kind==11.0) {
           float end=1-smoothstep(0.9,1.0,abs(p.y));

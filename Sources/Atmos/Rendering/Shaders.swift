@@ -16,9 +16,7 @@ let shaderSource = """
       float4 light;
       float4 shadowTint;
       float4 rim;
-      float4 lantern;
       float4 shake;
-      float4 pumpkins[3];
   };
 
   struct Sprite {
@@ -32,16 +30,6 @@ let shaderSource = """
       float tintGreen;
       float tintBlue;
       float lump;
-      float ghost;
-      float ground;
-      float eyes;
-      float form;
-      float paws;
-      float hold;
-      float armAngle;
-      float wave;
-      float dab;
-      float anger;
       float leaf;
       float turn;
       float flip;
@@ -60,18 +48,6 @@ let shaderSource = """
       float radius;
       float lump;
       float spin;
-      float warm;
-      float ghost;
-      float ground;
-      float eyes;
-      float form;
-      float size;
-      float paws;
-      float hold;
-      float armAngle;
-      float wave;
-      float dab;
-      float anger;
       float leaf;
       float turn;
       float flip;
@@ -81,7 +57,6 @@ let shaderSource = """
       float samples;
   };
 
-  constant float3 candle = float3(1.0, 0.62, 0.26);
 
   static float hash(float2 p) {
       p = fract(p * float2(123.34, 456.21));
@@ -135,7 +110,7 @@ let shaderSource = """
   }
 
   /// A leaf at one moment, `p` running across it from -0.5 to 0.5: its colour, premultiplied.
-  static float4 leafAt(float2 p, float seed, float turn, float flip, float alpha, float3 light, float warm) {
+  static float4 leafAt(float2 p, float seed, float turn, float flip, float alpha, float3 light) {
       float across = max(abs(flip), 0.35);
       float2 r = float2(cos(turn) * p.x + sin(turn) * p.y, -sin(turn) * p.x + cos(turn) * p.y) * 2.0;
       r.y /= across;
@@ -163,25 +138,194 @@ let shaderSource = """
       if (flip < 0.0) color = mix(color, float3(0.86, 0.74, 0.52), 0.28) * 0.9;
       // Night dims the leaves without draining their colour.
       color *= (0.8 + 0.2 * abs(flip)) * mix(float3(1.0), light, 0.4);
-      color = mix(color, candle, warm * 0.45);
       return float4(color * a, a);
   }
 
-  static float flicker(float time, float seed) {
-      return 0.86 + 0.08 * sin(time * 11.0 + seed * 2.1) + 0.06 * sin(time * 29.0 + 1.3 + seed * 4.3);
+  static float segmentDistance(float2 p,float2 a,float2 b) {
+      float2 ab=b-a;return length(p-a-ab*clamp(dot(p-a,ab)/max(dot(ab,ab),0.0001),0.0,1.0));
   }
-
-  /// How much candlelight reaches a point: the cursor's, and the pumpkins' in the snow.
-  static float candlelight(constant Uniforms &u, float2 point) {
-      float2 d = point - u.lantern.xy;
-      float glow = u.lantern.w * flicker(u.time, 0.0) * exp(-dot(d, d) / (u.lantern.z * u.lantern.z));
-      for (int k = 0; k < 3; k++) {
-          float4 pumpkin = u.pumpkins[k];
-          if (pumpkin.w <= 0.0) continue;
-          float2 e = point - pumpkin.xy;
-          glow += pumpkin.w * flicker(u.time, float(k + 1)) * exp(-dot(e, e) / (pumpkin.z * pumpkin.z));
+  static float hairCoverage(float2 p,float2 a,float2 b,float width,float aa) {
+      float2 ab=b-a,d=p-a-ab*clamp(dot(p-a,ab)/max(dot(ab,ab),0.00001),0.0,1.0);
+      return 1.0-smoothstep(width*width,(width+aa)*(width+aa),dot(d,d));
+  }
+  static float3 headProjection(float3 p,float2 yaw,float2 tilt) {
+      p=float3(yaw.x*p.x+yaw.y*p.z,p.y,-yaw.y*p.x+yaw.x*p.z);
+      return float3(p.x,tilt.x*p.y-tilt.y*p.z,tilt.y*p.y+tilt.x*p.z);
+  }
+  static float4 dandelionHeadAt(float2 p,float seed,float turn,float flip,float alpha,float3 light) {
+      // A spherical set of seed stalks and tiny parachutes. Rotation changes
+      // front/back overlap instead of flattening the head into a turning disk.
+      constexpr float3 directions[40]={
+          float3(0.2222049,0.9750000,0.0000000),float3(-0.2801759,0.9250000,0.2566641),float3(0.0423248,0.8750000,-0.4822692),float3(0.3438487,0.8250000,0.4484898),
+          float3(-0.6223007,0.7750000,-0.1100762),float3(0.5811355,0.7250000,-0.3696708),float3(-0.1915407,0.6750000,0.7125217),float3(-0.3597954,0.6250000,-0.6927642),
+          float3(0.7685089,0.5750000,0.2806582),float3(-0.7867126,0.5250000,0.3247435),float3(0.3729785,0.4750000,-0.7970333),float3(0.2709098,0.4250000,0.8637030),
+          float3(-0.8020723,0.3750000,-0.4648173),float3(0.9236560,0.3250000,-0.2030632),float3(-0.5529549,0.2750000,0.7865214),float3(-0.1252155,0.2250000,-0.9662795),
+          float3(0.7528493,0.1750000,0.6345022),float3(-0.9913095,0.1250000,0.0409938),float3(0.7068330,0.0750000,-0.7033933),float3(-0.0461770,0.0250000,0.9986204),
+          float3(-0.6405089,-0.0250000,-0.7675437),float3(0.9882781,-0.0750000,0.1329714),float3(-0.8144201,-0.1250000,0.5666523),float3(0.2160944,-0.1750000,-0.9605614),
+          float3(0.4844325,-0.2250000,0.8453994),float3(-0.9159610,-0.2750000,-0.2922165),float3(0.8585108,-0.3250000,-0.3966538),float3(-0.3578882,-0.3750000,0.8551556),
+          float3(-0.3063648,-0.4250000,-0.8517721),float3(0.7789541,-0.4750000,0.4093965),float3(-0.8229903,-0.5250000,0.2169376),float3(0.4424882,-0.5750000,-0.6881709),
+          float3(0.1322192,-0.6250000,0.7693459),float3(-0.5833358,-0.6750000,-0.4517680),float3(0.6863973,-0.7250000,-0.0568666),float3(-0.4291518,-0.7750000,0.4639005),
+          float3(0.0027569,-0.8250000,-0.5651260),float3(0.3252750,-0.8750000,0.3585682),float3(-0.3783457,-0.9250000,-0.0350650),float3(0.1769994,-0.9750000,-0.1343362)
+      };
+      float ct=cos(turn),st=sin(turn);
+      float2 r=float2(ct*p.x+st*p.y,-st*p.x+ct*p.y)*2.0;
+      float2 centre=float2(0,0.12);
+      float yawAngle=seed*9.7+turn*0.6,tiltAngle=flip*1.15;
+      float2 yaw=float2(cos(yawAngle),sin(yawAngle)),tilt=float2(cos(tiltAngle),sin(tiltAngle));
+      float aa=max(fwidth(r.x)*0.6,0.004);
+      float3 root=headProjection(float3(0,-0.91,0.05),yaw,tilt);
+      float2 bend=mix(centre,root.xy,0.55)+float2(0.045,0);
+      float stem=max(hairCoverage(r,centre,bend,0.016,aa),hairCoverage(r,bend,root.xy,0.011,aa));
+      float2 q=(r-centre)/0.115;
+      float core=1.0-smoothstep(0.8,1.0,length(q));
+      float coreZ=sqrt(saturate(1-dot(q,q)));
+      float3 coreColor=mix(float3(0.26,0.23,0.12),float3(0.73,0.64,0.40),saturate(0.45-q.x*0.23+q.y*0.2+coreZ*0.35));
+      float a=stem*0.8;float3 color=float3(0.39,0.43,0.20)*a;
+      color=mix(color,coreColor,core);a=mix(a,1.0,core);
+      float back=0,front=0;float3 backColor=float3(0),frontColor=float3(0);
+      for(uint k=0;k<40;k++) {
+          float3 direction=directions[k];
+          float3 n=headProjection(direction,yaw,tilt);
+          float reach=0.58*(0.92+0.08*fract(float(k)*0.618+seed*3.1));
+          float3 tip=n*reach;
+          float3 tangent=headProjection(normalize(cross(direction,float3(0.12,1,0.07))),yaw,tilt);
+          float3 across=cross(n,tangent);
+          float2 end=centre+tip.xy;
+          float stalk=hairCoverage(r,centre+n.xy*0.08,end-n.xy*0.055,0.005,aa);
+          float tuft=0;
+          constexpr float2 ring[5]={float2(1,0),float2(0.309,0.951),float2(-0.809,0.588),float2(-0.809,-0.588),float2(0.309,-0.951)};
+          for(uint spoke=0;spoke<5;spoke++) {
+              float2 spread=(tangent.xy*ring[spoke].x+across.xy*ring[spoke].y)*0.078;
+              tuft=max(tuft,hairCoverage(r,end-n.xy*0.06,end+spread,0.009,aa));
+          }
+          float coverage=stalk*0.32+tuft*0.68;
+          float lit=0.35+0.65*saturate(dot(n,float3(-0.42,0.55,0.72)));
+          float3 tint=mix(float3(0.52,0.56,0.48),float3(1.0,0.99,0.90),lit);
+          if(n.z<0){back+=coverage*0.52;backColor+=tint*coverage*0.52;}
+          else {front+=coverage;frontColor+=tint*coverage;}
       }
-      return min(glow, 1.0);
+      float rear=1.0-exp(-back*0.72),near=1.0-exp(-front*0.85);
+      float3 rearColor=backColor/max(back,0.001);
+      // Rear filaments remain visible around the seed centre; the near cap lays
+      // over them. Directional light and depth distinguish a globe from a disk.
+      color+=rearColor*rear*(1-a);a+=rear*(1-a);
+      color=color*(1-near)+frontColor/max(front,0.001)*near;a=a*(1-near)+near;
+      color*=mix(float3(1),light,0.3)*alpha;a*=alpha;
+      return float4(color,a);
+  }
+  // Clear silhouettes first; asymmetry, rolled edges and fine veins only reveal themselves up close.
+  // All species share the leaves' actual translational and angular exposure blur.
+  static float4 botanicalAt(float2 p, float seed, float turn, float flip, float alpha, float3 light, float style) {
+      if(style<1.5)return leafAt(p,seed,turn,flip,alpha,light);
+      float2 r=float2(cos(turn)*p.x+sin(turn)*p.y,-sin(turn)*p.x+cos(turn)*p.y)*2.0;
+      r.y/=max(abs(flip),0.28);
+      if(style>4.5 && style<5.5) {
+          // Rotate in the horizontal rotor plane, then project its vertical depth.
+          // The inverse projection keeps the stem fixed while the wing circles it.
+          float lean=(seed-0.5)*smoothstep(0.16,0.28,abs(flip));
+          float2 tilted=float2(cos(lean)*p.x+sin(lean)*p.y,-sin(lean)*p.x+cos(lean)*p.y);
+          float2 rotor=float2(tilted.x,tilted.y/clamp(abs(flip),0.12,0.58))*2.0;
+          r=float2(cos(turn)*rotor.x+sin(turn)*rotor.y,-sin(turn)*rotor.x+cos(turn)*rotor.y);
+          r+=float2(-0.91,-0.20);
+      }
+      if(style>2.5 && style<3.5 && seed>2.0) {
+          return dandelionHeadAt(p,seed,turn,flip,alpha,light);
+      }
+      float shape=-1;float3 color=float3(1);float vein=0;
+      if(style<2.5 || (style>3.5 && style<4.5)) {
+          bool rose=style>3.5;
+          float u=clamp((r.x+0.84)/1.66,0.0,1.0);
+          float bend=(seed-0.45)*0.22*sin(u*3.14159);
+          float y=r.y-bend;
+          float width=(rose?0.74:0.63)*pow(max(0.0,sin(u*3.14159)),rose?0.43:0.68)*(0.42+0.9*u);
+          width*=0.88+0.22*seed;
+          width*=1.0+0.055*sin(u*19.0+seed*31.0)+(y>0.0?0.08:-0.05);
+          shape=min(width-abs(y),min(r.x+0.84,0.82-r.x));
+          if(!rose) {
+              // Sakura's split lip and narrow base distinguish it even at small sizes.
+              float notch=length((r-float2(0.77,bend))*float2(1.0,1.7))-(0.16+seed*0.07);
+              shape=min(shape,notch);
+          } else {
+              // A broad fan with an off-centre fold and a slightly curled, scalloped lip.
+              shape=min(shape,0.79-r.x+0.045*cos(y*14.0+seed*5.0));
+              shape-=0.035*sin(u*14.0+seed*9)*smoothstep(0.60,0.95,u);
+          }
+          float fanAngle=atan2(y,r.x+1.03);
+          vein=pow(0.5+0.5*cos(fanAngle*(rose?34.0:42.0)+seed*3.0),24.0)*smoothstep(0.08,0.45,u);
+          float fold=exp(-abs(y-(rose?0.16:-0.06)*sin(u*3.14159))*24.0);
+          float rim=exp(-max(shape,0.0)*27.0);
+          float3 base=rose?mix(float3(0.72,0.13,0.28),float3(0.98,0.49,0.58),seed):mix(float3(1.0,0.72,0.80),float3(1.0,0.94,0.92),seed);
+          float3 root=rose?float3(0.46,0.035,0.16):float3(0.89,0.34,0.49);
+          color=mix(root,base,smoothstep(0.02,0.72,u));
+          color*=1.0-vein*0.12;
+          color*=0.82+0.18*smoothstep(-0.25,0.35,y);
+          color+=float3(1.0,0.83,0.80)*(fold*0.055+rim*(y>0?0.10:0.025));
+          color*=1.0-exp(-abs(shape-0.05)*32.0)*0.09;
+          if(flip<0)color=mix(color,rose?float3(0.98,0.66,0.66):float3(1,0.95,0.94),0.22);
+      } else if(style<3.5) {
+          // An airy, cupped parachute with individually bowed filaments and a hanging achene.
+          shape=min(0.021-segmentDistance(r,float2(-0.65,-0.06),float2(0.12,0.0)),0.12-r.x);
+          for(int k=0;k<11;k++) {
+              float a=-1.42+float(k)*0.284;
+              float2 tip=float2(0.24+0.43*cos(a),0.69*sin(a));
+              tip.y*=0.88+0.12*sin(seed*17+float(k)*2.1);
+              float2 middle=mix(float2(0.08,0),tip,0.5)+float2(-0.06,0.04*sin(a));
+              float hair=min(segmentDistance(r,float2(0.08,0),middle),segmentDistance(r,middle,tip));
+              shape=max(shape,0.014-hair);
+              shape=max(shape,0.020-segmentDistance(r,tip,tip+float2(0.06,0.035*sin(a))));
+          }
+          float nut=0.095-length((r-float2(-0.70,-0.065))*float2(0.65,1.8));
+          shape=max(shape,nut);
+          color=mix(float3(0.47,0.29,0.12),float3(0.98,0.96,0.85),smoothstep(-0.62,-0.15,r.x));
+      } else if(style<5.5) {
+          // A maple samara: a curved, tapered wing growing from a heavy seed, with radial ribs.
+          float u=clamp((r.x+0.70)/1.48,0.0,1.0);
+          float centre=-0.19+u*0.55-0.16*sin(u*3.14159);
+          float width=0.36*pow(max(0.0,sin(u*3.14159)),0.65)*(1.0-u*0.47);
+          shape=min(width-abs(r.y-centre),min(r.x+0.70,0.78-r.x));
+          float nut=0.17-length((r-float2(-0.66,-0.20))*float2(0.85,1.2));
+          shape=max(shape,nut);
+          shape=max(shape,0.026-segmentDistance(r,float2(-0.91,-0.20),float2(-0.66,-0.20)));
+          float angle=atan2(r.y+0.22,r.x+0.86);
+          vein=pow(0.5+0.5*sin(angle*80+seed*3),22.0);
+          color=mix(float3(0.67,0.46,0.19),float3(0.88,0.73,0.38),seed);
+          color*=0.89+0.11*smoothstep(-0.3,0.3,r.y-centre);
+          color*=1-vein*0.18;
+          color=mix(color,float3(0.38,0.23,0.10),smoothstep(-0.015,0.05,nut)*0.8);
+          color+=float3(0.12,0.10,0.055)*exp(-max(shape,0.0)*35.0);
+      } else {
+          // Cottonwood is a loose, uneven tuft; its seed and curved fibres replace the old radial disk.
+          for(int k=0;k<17;k++) {
+              float a=float(k)*2.39996+seed*17;
+              float reach=0.40+0.35*fract(sin(float(k)*31.7+seed*97)*1723.0);
+              float2 tip=float2(cos(a)*reach,sin(a)*reach*0.74);
+              float2 bend=tip*0.48+float2(sin(a)*0.18,cos(a)*0.19);
+              float2 previous=float2(0);
+              for(int j=1;j<=4;j++) {
+                  float t=float(j)/4.0;
+                  float2 next=2*(1-t)*t*bend+t*t*tip;
+                  float strand=segmentDistance(r,previous,next);
+                  shape=max(shape,(0.014-0.006*t)-strand);previous=next;
+              }
+          }
+          float core=0.075-length((r-float2(-0.04,0))*float2(0.65,1.6));
+          shape=max(shape,core);
+          color=mix(float3(0.62,0.50,0.31),float3(0.98,0.97,0.89),smoothstep(0.03,0.17,length(r)));
+          alpha*=0.90;
+      }
+      float edge=max(fwidth(shape),0.005);float a=smoothstep(-edge,edge,shape)*alpha;
+      if(style>5.5)a=max(a*0.75,exp(-dot(r,r)*9.0)*alpha*0.12);
+      color*=mix(float3(1),light,0.35)*(0.85+0.15*abs(flip));
+      return float4(color*a,a);
+  }
+  static float3 botanicalLitter(float2 point,float style) {
+      if(style<1.5)return litter(point);
+      float n=hash(floor(point/3.5));
+      if(style<2.5)return mix(float3(0.74,0.42,0.50),float3(1,0.83,0.87),n);
+      if(style<3.5)return mix(float3(0.53,0.43,0.29),float3(0.91,0.89,0.78),n);
+      if(style<4.5)return mix(float3(0.46,0.07,0.19),float3(0.93,0.38,0.49),n);
+      if(style<5.5)return mix(float3(0.38,0.23,0.11),float3(0.77,0.58,0.28),n);
+      return mix(float3(0.73,0.71,0.63),float3(0.97,0.95,0.87),n);
   }
 
   vertex SpriteOut spriteVertex(uint vid [[vertex_id]],
@@ -195,7 +339,7 @@ let shaderSource = """
           float exposure = 0.024;
           float pixels = max(s.size * u.scale, 2.0);
           float2 travel = s.velocity * exposure;
-          float extent = pixels + length(travel) * u.scale;
+          float extent = pixels * (u.autumn>4.5 && u.autumn<5.5 ? 1.85 : 1.0) + length(travel) * u.scale;
           out.position = float4((s.position - travel * 0.5 + u.shake.xy) / u.viewSize * 2.0 - 1.0, 0.0, 1.0);
           out.pointSize = extent;
           out.reach = extent / pixels;
@@ -204,14 +348,15 @@ let shaderSource = """
           out.flipSmear = s.flipSpeed * exposure;
           // Enough moments along the smear that no copy of the leaf stands apart from the next.
           float motion = length(travel) * u.scale + (abs(out.turnSmear) + abs(out.flipSmear)) * pixels * 0.5;
-          out.samples = clamp(ceil(motion / 1.2), 1.0, 8.0);
+          // Fast samaras need closer angular samples to keep the spinning wing
+          // continuous. Other materials retain their existing sampling budget.
+          float maximumSamples = u.autumn>4.5 && u.autumn<5.5 ? 32.0 : 8.0;
+          out.samples = clamp(ceil(motion / 1.2), 1.0, maximumSamples);
           out.alpha = s.alpha;
           out.light = u.light.rgb;
-          out.warm = candlelight(u, s.position);
           out.leaf = s.leaf;
           out.turn = s.turn;
           out.flip = s.flip;
-          out.ghost = 0.0;
           return out;
       }
       float pixels = s.size * u.scale;
@@ -234,21 +379,6 @@ let shaderSource = """
       out.light = u.light.rgb;
       out.lump = s.lump;
       out.spin = s.lump > 0.0 ? u.time * (s.lump - 0.5) * 9.0 + s.lump * 40.0 : 0.0;
-      out.warm = candlelight(u, s.position);
-      out.ghost = s.ghost;
-      if (s.ghost > 0.0) {
-          out.spin = u.time + s.ghost * 40.0;
-          out.ground = (s.ground - s.position.y) / max(s.size, 0.001);
-          out.eyes = s.eyes;
-          out.form = s.form;
-          out.size = s.size;
-          out.paws = s.paws;
-          out.hold = s.hold;
-          out.armAngle = s.armAngle;
-          out.wave = s.wave;
-          out.dab = s.dab;
-          out.anger = s.anger;
-      }
       out.leaf = 0.0;
       return out;
   }
@@ -263,125 +393,14 @@ let shaderSource = """
           for (int k = 0; k < n; k++) {
               float along = (float(k) + 0.5) / float(n) - 0.5;
               float back = along - 0.5;
-              sum += leafAt(p * in.reach - in.streak * along, in.leaf, in.turn + in.turnSmear * back,
-                            clamp(in.flip + in.flipSmear * back, -1.0, 1.0), in.alpha, in.light, in.warm);
+              sum += botanicalAt(p * in.reach - in.streak * along, in.leaf, in.turn + in.turnSmear * back,
+                            clamp(in.flip + in.flipSmear * back, -1.0, 1.0), in.alpha, in.light,u.autumn);
           }
           sum /= float(n);
           if (sum.a < 0.002) discard_fragment();
           return sum;
       }
-      if (in.ghost > 0.0) {
-          // Snow from the drift heaps up and takes the ghost's shape: a sheet over a tall round head that flares
-          // into swaying folds and runs into the drift through a skirt of snow.
-          float t = in.spin;
-          float heap = 0.3 * smoothstep(0.0, 0.5, in.form);
-          float shaped = smoothstep(0.4, 1.0, in.form);
-          // A wave passing through its middle bobs it up and down; a dab ducks it a little.
-          float2 q = float2(p.x - sin(t * 1.2 + p.y * 3.5) * 0.02 * (0.22 - p.y) * shaped, p.y - in.wave * 0.025 * sin(t * 6.0));
-          q += in.dab * float2(0.015, 0.02);
-          // A cross one shakes with rage, and throws its whole body into a throw: back as it winds up, forward as it lets go.
-          q.x += in.anger * shaped * 0.01 * sin(t * 57.0);
-          float lean = in.anger * in.hold * clamp((in.armAngle - 0.5) / 1.25, -0.6, 1.0);
-          q.x += lean * 0.14 * max(q.y - in.ground, 0.0);
-          float side = 0.17 + pow(max(0.22 - q.y, 0.0), 1.3) * 0.35;
-          float sheet = q.y > 0.22 ? 0.17 - length(q - float2(0.0, 0.22)) : side - abs(q.x);
-          float skirt = in.ground + 0.07 * smoothstep(0.45, 0.0, abs(p.x)) - p.y;
-          float blend = max(0.05 - abs(sheet - skirt), 0.0) / 0.05;
-          float formed = max(sheet, skirt) + blend * blend * 0.05 * 0.25;
-          // Paws hang tucked into its sides until it throws them up to say boo, holds one out for a sign or a throw,
-          // spreads both for a wave that runs in at one paw, through its shoulders and out at the other, or dabs:
-          // one paw flung up and out, the other bent across its face.
-          float cover = 0.0;
-          for (float hand = -1.0; hand <= 1.0; hand += 2.0) {
-              float up = max(max(in.paws, in.wave), in.dab);
-              float angle = mix(-1.35, 0.6 + 0.12 * sin(t * 9.0 + hand), in.paws);
-              if (hand > 0.0) {
-                  angle = mix(angle, in.armAngle, in.hold);
-                  up = max(up, in.hold);
-              }
-              float2 joint = float2(hand * 0.17, 0.1);
-              for (int k = 1; k <= 3; k++) {
-                  float2 straight = float2(hand * 0.17, 0.1) + float2(hand * cos(angle), sin(angle)) * (0.057 * float(k));
-                  float x = hand * (0.17 + 0.07 * float(k));
-                  float2 next = mix(straight, float2(x, 0.12 + 0.045 * sin(t * 6.0 - x * 12.0)), in.wave);
-                  float2 dabbed = hand > 0.0 ? float2(0.17, 0.1) + float2(cos(0.75), sin(0.75)) * (0.06 * float(k))
-                      : k == 1 ? float2(-0.1, 0.17) : k == 2 ? float2(-0.02, 0.24) : float2(0.07, 0.3);
-                  next = mix(next, dabbed, in.dab);
-                  float2 bone = next - joint;
-                  float along = saturate(dot(q - joint, bone) / max(dot(bone, bone), 1e-5));
-                  float radius = 0.045 * (0.4 + 0.6 * up) * (1.0 - 0.08 * float(k - 1) - 0.08 * along);
-                  float paw = radius - length(q - joint - bone * along);
-                  if (hand < 0.0) cover = max(cover, smoothstep(-0.005, 0.005, paw) * in.dab);
-                  float join = max(0.03 - abs(formed - paw), 0.0) / 0.03;
-                  formed = max(formed, paw) + join * join * 0.03 * 0.25;
-                  joint = next;
-              }
-          }
-          float inside = mix(in.ground + heap * smoothstep(0.34, 0.0, abs(p.x)) - p.y, formed, shaped);
-          // Its middle reaches down into the drift, hiding the drift's bright edge where the two meet, and fades out
-          // lower down and to the sides.
-          float under = in.ground - p.y;
-          float sunk = (1.0 - smoothstep(0.05, 0.11, under)) * smoothstep(0.45, 0.25, abs(p.x));
-          float a = smoothstep(0.0, 0.02, inside) * max(1.0 - smoothstep(-0.015, 0.0, under), sunk);
-          if (a < 0.002) discard_fragment();
 
-          // Lit as the drifts are: bright at its surface, shaded deeper in and on the sides turned from the light.
-          float depth = max(inside, 0.0) * in.size;
-          float2 slope = float2(dfdx(inside), -dfdy(inside));
-          float lit = length(slope) > 0.0 ? dot(normalize(-slope), normalize(float2(-0.5, 1.0))) : 1.0;
-          float folds = (0.5 + 0.5 * sin(q.x / side * 7.5 + sin(q.y * 5.0 + t * 0.9) * 0.8)) * smoothstep(0.18, -0.2, q.y) * shaped;
-          float shade = (1.0 - exp(-depth / 30.0)) * 0.32 + (1.0 - lit) * 0.6 * exp(-depth / 5.0) + folds * 0.18;
-          float3 shadow = mix(float3(0.72, 0.78, 0.88), u.shadowTint.rgb, u.shadowTint.a);
-          float3 surface = mix(float3(0.925, 0.94, 0.965), min(u.shadowTint.rgb * 1.18, float3(1.0)), u.shadowTint.a * 0.2);
-          float3 color = mix(surface, shadow, saturate(shade));
-          color = mix(color, float3(0.975, 0.982, 0.995), exp(-depth * 0.9) * 0.6);
-          // Down in the drift it takes on the drift's own colour at that depth, so no seam shows where it fades.
-          float below = max(under, 0.0) * in.size;
-          float3 drift = mix(surface, shadow, saturate((1.0 - exp(-below / 30.0)) * 0.32 + 0.064 * exp(-below / 5.0)));
-          color = mix(color, mix(drift, float3(0.975, 0.982, 0.995), exp(-below * 0.9) * 0.6), smoothstep(1.0, 4.0, below));
-          if (u.autumn > 0.5) {
-              float2 world = float2(in.position.x / u.scale, u.viewSize.y - in.position.y / u.scale);
-              color = litter(world) * (1.0 - saturate(shade) * 0.6);
-          }
-          color += (hash(floor(in.position.xy)) - 0.5) * 0.02;
-          float glint = u.autumn > 0.5 ? 0.0 : hash(floor(in.position.xy * 0.5) + 31.7);
-          if (glint > 0.992) {
-              float twinkle = pow(saturate(sin(u.time * (0.6 + glint * 1.8) + glint * 90.0)), 28.0);
-              color = mix(color, float3(1.0), twinkle * exp(-depth / 7.0));
-          }
-          color *= u.autumn > 0.5 ? mix(float3(1.0), u.light.rgb, 0.4) : u.light.rgb;
-          color = mix(color, u.rim.rgb, u.rim.a * exp(-depth / 2.5) * (1.0 - u.autumn));
-          color = mix(color, candle, in.warm * (0.35 + 0.65 * exp(-depth / 14.0)) * 0.55);
-
-          // Two dark hollows for eyes, blinking now and then; a cross one glares under brows slanting down inward.
-          float blink = step(fract(t * 0.29 + in.ghost * 7.0), 0.035) * (1.0 - in.anger);
-          float2 eye = float2(0.03, 0.042 * (1.0 - 0.85 * blink));
-          float eyes = 0.0;
-          for (float s = -1.0; s <= 1.0; s += 2.0) {
-              float2 e = q - float2(s * 0.065, 0.24);
-              float glare = mix(1.0, smoothstep(0.004, -0.004, e.y - (0.006 + 0.7 * s * e.x)), in.anger);
-              eyes = max(eyes, (1.0 - smoothstep(0.75, 1.0, length(e / eye))) * glare);
-              float2 from = float2(s * 0.02, 0.266), to = float2(s * 0.105, 0.302);
-              float2 brow = to - from;
-              float along = saturate(dot(q - from, brow) / dot(brow, brow));
-              eyes = max(eyes, (1.0 - smoothstep(0.008, 0.013, length(q - from - brow * along))) * in.anger);
-          }
-          // Embers glowing in its eyes, and a toothy scowl.
-          float embers = 0.0;
-          for (float s = -1.0; s <= 1.0; s += 2.0) {
-              embers = max(embers, 1.0 - smoothstep(0.008, 0.016, length(q - float2(s * 0.062, 0.232))));
-          }
-          float2 m = q - float2(0.0, 0.152);
-          float scowl = (1.0 - smoothstep(0.0, 0.006, max(abs(m.x) - 0.05, abs(m.y) - 0.016 - 0.006 * cos(m.x * 20.0)))) * in.anger;
-          float teeth = step(0.016 - 0.016 * abs(fract(m.x * 25.0) * 2.0 - 1.0), m.y + 0.004) + step(m.y - 0.004, -0.016 + 0.016 * abs(fract(m.x * 25.0 + 0.5) * 2.0 - 1.0));
-          eyes = max(eyes, scowl * (1.0 - saturate(teeth)));
-          eyes *= in.eyes * (1.0 - cover);
-          embers *= in.anger * in.eyes;
-          float mouth = in.paws > 0.05 ? 1.0 - smoothstep(0.75, 1.0, length((q - float2(0.0, 0.135)) / (float2(0.026, 0.036) * in.paws))) : 0.0;
-          color = mix(color, float3(0.06, 0.06, 0.09), max(eyes, mouth * in.eyes));
-          color = mix(color, float3(1.0, 0.38, 0.1) * (0.85 + 0.15 * sin(t * 13.0)), embers);
-          return float4(color * a, a);
-      }
       float2 half_ = in.streak * 0.5;
       float span = dot(half_, half_);
       float t = span > 0.0 ? clamp(dot(p, half_) / span, -1.0, 1.0) : 0.0;
@@ -401,8 +420,6 @@ let shaderSource = """
       float3 rim = float3(0.62, 0.67, 0.77);
       float3 color = mix(core, rim, saturate(smoothstep(0.35, 1.0, r) * 0.65 + shading));
       color = mix(color, in.tint.rgb, in.tint.a) * in.light;
-      color = mix(color, candle, in.warm * 0.7);
-      a = min(1.0, a * (1.0 + in.warm * 0.8));
       return float4(color * a, a);
   }
 
@@ -460,7 +477,7 @@ let shaderSource = """
       float3 color;
       if (u.autumn > 0.5) {
           // Deeper in the heap the leaves lie in shadow.
-          color = litter(grain);
+          color = botanicalLitter(grain,u.autumn);
           color = mix(color, color * float3(0.62, 0.54, 0.5), saturate(1.0 - exp(-depth / 18.0)) * 0.6);
           color *= 0.84 + 0.2 * light;
       } else {
@@ -480,86 +497,8 @@ let shaderSource = """
 
       // Night dims fallen leaves without draining their colour.
       color *= u.autumn > 0.5 ? mix(float3(1.0), u.light.rgb, 0.4) : u.light.rgb;
-      color = mix(color, u.rim.rgb, u.rim.a * exp(-depth / 2.5) * (1.0 - u.autumn));
-      color = mix(color, candle, candlelight(u, world) * (0.35 + 0.65 * exp(-depth / 14.0)) * 0.55);
+      color = mix(color, u.rim.rgb, u.rim.a * exp(-depth / 2.5) * (1.0 - min(1.0,u.autumn)));
       return float4(color * coverage, coverage);
   }
 
-  struct SignUniforms {
-      float2 anchor;
-      float2 size;
-      float angle;
-      float ground;
-  };
-
-  struct SignOut {
-      float4 position [[position]];
-      float2 uv;
-      float2 world;
-  };
-
-  vertex SignOut signVertex(uint vid [[vertex_id]], constant SignUniforms &s [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
-      float2 corner = float2(float(vid & 1), float(vid >> 1));
-      float2 local = float2((corner.x - 0.5) * s.size.x, corner.y * s.size.y);
-      float2 world = s.anchor + float2(local.x * cos(s.angle) - local.y * sin(s.angle), local.x * sin(s.angle) + local.y * cos(s.angle));
-      SignOut out;
-      out.position = float4((world + u.shake.xy) / u.viewSize * 2.0 - 1.0, 0.0, 1.0);
-      out.uv = float2(corner.x, 1.0 - corner.y);
-      out.world = world;
-      return out;
-  }
-
-  fragment float4 signFragment(SignOut in [[stage_in]], texture2d<float> picture [[texture(0)]],
-                               constant SignUniforms &s [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
-      constexpr sampler linear(filter::linear, address::clamp_to_edge);
-      float4 color = picture.sample(linear, in.uv);
-      // It comes up out of the snow: nothing shows below the drift's surface.
-      color *= smoothstep(s.ground - 1.0, s.ground + 1.0, in.world.y);
-      // The moonlight only half dims it, so it stays orange.
-      color.rgb *= mix(float3(1.0), u.light.rgb, 0.5);
-      color.rgb = mix(color.rgb, candle * color.a, candlelight(u, in.world) * 0.3);
-      return color;
-  }
-
-  struct PumpkinUniforms {
-      float2 anchor;
-      float width;
-      float seed;
-  };
-
-  struct PumpkinOut {
-      float4 position [[position]];
-      float2 uv;
-      float2 world;
-  };
-
-  constant float2 pumpkinShape = float2(1.0, 0.82);
-  constant float2 pumpkinCandle = float2(0.5, 0.45);
-
-  /// A quad reaching past the pumpkin on every side but the bottom, for its glow.
-  vertex PumpkinOut pumpkinVertex(uint vid [[vertex_id]], constant PumpkinUniforms &p [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
-      float2 corner = float2(float(vid & 1), float(vid >> 1));
-      float2 uv = float2(mix(-0.6, 1.6, corner.x), mix(0.0, 1.8, corner.y));
-      float2 world = p.anchor + (uv - float2(0.5, 0.0)) * pumpkinShape * p.width;
-      PumpkinOut out;
-      out.position = float4((world + u.shake.xy) / u.viewSize * 2.0 - 1.0, 0.0, 1.0);
-      out.uv = float2(uv.x, 1.0 - uv.y);
-      out.world = world;
-      return out;
-  }
-
-  fragment float4 pumpkinFragment(PumpkinOut in [[stage_in]], texture2d<float> shell [[texture(0)]], texture2d<float> face [[texture(1)]],
-                                  constant PumpkinUniforms &p [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
-      constexpr sampler smooth(filter::linear, mip_filter::linear, address::clamp_to_zero);
-      float flame = flicker(u.time, p.seed + 1.0);
-      float4 body = shell.sample(smooth, in.uv);
-      float4 fire = face.sample(smooth, in.uv);
-      body.rgb *= mix(float3(1.0), u.light.rgb, 0.5);
-      fire.rgb *= 0.8 + 0.25 * flame;
-      float4 color = fire + body * (1.0 - fire.a);
-      // At night it glows into the dark around it.
-      float2 d = (in.world - (p.anchor + (pumpkinCandle - float2(0.5, 0.0)) * pumpkinShape * p.width)) / (p.width * 0.45);
-      float halo = u.lantern.w * 0.3 * flame * exp(-dot(d, d));
-      return color + float4(candle * halo, halo) * (1.0 - color.a);
-  }
   """

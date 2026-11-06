@@ -29,14 +29,43 @@ the app targets your display's native refresh rate, including 120 Hz ProMotion.*
 - **Watch the weather change.** New effects arrive immediately while the old scene naturally melts, dries or dissipates.
 - **Keep working.** Controls remain accessible. A window at the top edge covers the weather within its own outline; 70% screen coverage moves the scene behind windows.
 
-| Precipitation | Atmosphere | Nature |
+| Weather | Seasonal Drift | Wildlife |
 | --- | --- | --- |
-| Snow · Rain · Drizzle | Mist · Cloud Wisps | Autumn Leaves |
-| Storm · Lightning · Sleet · Hail | Sunbeams | Fireflies |
+| Snow · Rain · Drizzle · Storm | Autumn Leaves · Cherry Blossoms | Birds |
+| Lightning · Sleet · Hail | Dandelions · Rose Petals | Butterflies |
+| Mist · Cloud Wisps · Sunbeams | Maple Seeds · Cottonwood Fluff | Fireflies |
 
-**Live Weather** combines effects to match local conditions, including lighter cloud
-cover, sunbeams or nighttime fireflies. Its menu card shows the location, condition,
-temperature, observation time and active provider. Intensity adjusts automatically.
+Live Weather is on for new installs, with no manual layers preselected.
+Choose one item in each section of **Manual Scene**. Click a selected item again to
+turn that layer off; weather, drifting material and wildlife work independently.
+Petals and seeds share the original leaves' tumbling, cursor interaction, window
+accumulation and motion blur. Whole dandelion seed heads burst into windborne seeds
+with a soft poof when you sweep through them. Maple seeds autorotate around the stem in individually tilted horizontal planes.
+Maple seeds decay naturally and accumulate more lightly than autumn leaves.
+Birds arrive in groups of 2–5, usually alone with an occasional second flock and long
+quiet gaps. They sometimes rest on window tops; gentle drags carry them, while a shake
+makes them fly away.
+
+**Live Weather** continuously shapes cloud cover, rain density and drop motion from
+local measurements, with shared gusts and shelter behind windows. Humidity affects
+cloud density and evaporation; feels-like temperature affects snow thawing and wildlife.
+Rainfall is normalized to mm/h for both providers. Individual drop fall speed is inferred
+from rainfall intensity, since weather providers do not measure it.
+
+Seasonal Drift and Wildlife arrive in short spells with quiet intervals, according to
+season, hemisphere, wind, rain, warmth and daylight. Windy autumn days can carry leaves
+and maple seeds; spring brings blossom and dandelions; warm, dry days can bring
+butterflies or birds, and mild summer nights can bring fireflies. Heavy storms suppress
+these extras. The menu card shows current measurements and active layers.
+
+Wind uses a fixed compass projection from the reported direction and speed, with no
+orientation setup. Window edges split the flow and create shelter and eddies; lighter
+seeds follow air more readily than heavier leaves. Leaves and petals float on actual
+puddle surfaces, ride ripples and currents, and settle back onto their ledges as water dries.
+Snow melts on contact with puddles. Butterflies turn with their flight and stay behind
+application windows. Birds have four randomized plumage and silhouette variations.
+Dandelions fall as whole seed globes with layered filaments and shaded centres;
+sweeping through one releases its individual seeds in a soft burst.
 
 ## Install
 
@@ -54,8 +83,10 @@ it, use **System Settings → Privacy & Security → Open Anyway**. See
 
 ## Make it yours
 
-Choose a manual scene or switch **Live Weather** on. Use the intensity slider for
-manual scenes; live intensity is automatic. **Surfaces** controls accumulation,
+Combine manual layers or switch **Live Weather** on. Use the intensity slider for
+manual scenes; live intensity is automatic. **Wind Speed**, directly below intensity,
+sets manual wind from 0–100 km/h and remembers the setting. Live Weather controls wind
+automatically. Both modes use shared gusts and shelter behind windows. **Surfaces** controls accumulation,
 evaporation and window interaction. **Settings** includes placement, screenshot
 visibility, full-screen behaviour and Open at Login.
 
@@ -70,14 +101,31 @@ the macOS permission. **Settings → Water Reflection Source** offers:
 | **Window Snapshots** | Cached window images that follow window movement; content refreshes about once a second |
 | **Wallpaper Only** | Wallpaper reflections without capturing other apps |
 
-Water remains interactive with every source. Leaving a rain scene dries its puddles
+Water remains interactive with every source. Cursor disturbances refill quickly, and
+rain impacts produce visible ripples and energy-scaled splashes on both desktop and
+window puddles. Splashes rise mostly upward and carry the rain's wind momentum.
+Storm impacts merge into smooth, bounded waves; a lightning strike drives a broad
+crown and a pressure-fed jet from the water it hits. Leaving a rain scene dries its puddles
 in roughly eight seconds. Switching between water scenes preserves existing water.
+Persistent rain can overwhelm the meniscus on a window ledge and spill down its sides.
+A conservative shallow-water field keeps window films thin and exchanges volume with
+free liquid particles that solve pressure, cohesion and viscosity. Window acceleration
+drives flow and separation. The cursor is a solid collider: displaced water flows around
+it, and collision momentum can create a splash. Rising puddles lift settled leaves;
+splashes carry all floating seasonal material with the local liquid velocity. Water
+can flow over a submerged cursor. Fast collisions and shearing liquid produce crisp
+white froth that quickly fizzles away. Splashes use fine liquid parcels with smoothed
+density contours over neighbouring samples to preserve thin strings and small blobs.
+Their soft, asymmetric outlines deform with flow and wobble as they move.
+Fresh window releases share the available sample budget so a full particle pool does
+not defer the visible splash. Slow cursor hovering does not generate foam. Airborne droplets use the same reflection
+source as puddles; they do not independently start screen capture.
 
 ## Privacy & weather sources
 
-- **Location Services** is requested when you enable Live Weather. Coordinates are rounded before requests; location and weather readings remain in memory.
+- **Location Services** is requested when Live Weather first starts. A more accurate fix and neighbourhood-first place names improve local labels. Weather coordinates are rounded to roughly a kilometre; reverse geocoding uses coordinates rounded to roughly 100 metres. Location and weather readings remain in memory.
 - **Screen Recording** is needed for desktop and window reflections. Images stay on your Mac, are never saved or uploaded, and contain no audio. macOS **Stop Sharing** is respected.
-- **Automatic · Apple First** prefers Apple's WeatherKit service and clearly labels the Open-Meteo fallback. You can also select either provider manually.
+- **Automatic · Apple First** tries Apple on every request and clearly labels the Open-Meteo fallback. Transient fallback retries Apple after 30 seconds, backing off to five minutes. Attribution-image failures never discard a successful weather reading. You can also select either provider manually.
 
 Apple Weather needs a WeatherKit-enabled signed build or personal credentials stored
 in Keychain. A source build works with Open-Meteo without an API key. Atmos uses the
@@ -88,11 +136,14 @@ See [weather setup](RELEASING.md#apple-weather).
 
 Swift and AppKit handle the menu, displays and system integration. Metal renders the
 effects and simulates cloud flow; an allocation-free Rust core handles particles and
-water. Buffers and pipelines are reused, and desktop capture adapts independently
+water. Metal reconstructs liquid contours directly in GPU buffers, with a Rust
+fallback; splash merging uses fixed storage and conserves mass and momentum.
+Buffers and pipelines are reused, and desktop capture adapts independently
 of animation. Visible animations target each display's native rate; macOS may lower
 the physical refresh rate for power or thermal reasons.
 
-By default, animation and capture pause while the display is asleep, locked or covered
+Weather refresh resumes after wake and network reconnection, with short retries while
+services recover. By default, animation and capture pause while the display is asleep, locked or covered
 by a full-screen app. Reduce Motion is respected. Energy use varies with the scene,
 resolution, display rate and reflection source; no fixed CPU/GPU percentage is promised.
 

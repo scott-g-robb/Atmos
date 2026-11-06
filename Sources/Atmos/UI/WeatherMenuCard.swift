@@ -75,7 +75,7 @@ final class WeatherMenuCard: NSView {
         reading.apparentTemperature.map { "Feels like \(Int($0.rounded()))°" }
         ?? "\(reading.isDay == 1 ? "Daytime" : "Nighttime")"
       metrics.stringValue =
-        "\(feels)     Wind \(Int(reading.windSpeed.rounded())) km/h \(direction)\nCloud \(Int((reading.cloudCover ?? 0).rounded()))%     Rain \(String(format: "%.1f", reading.precipitation)) \(reading.precipitationUnit)"
+        "\(feels)     Wind \(Int(reading.windSpeed.rounded())) km/h \(direction)\nCloud \(Int((reading.cloudCover ?? 0).rounded()))%     Rain \(String(format: "%.1f", reading.precipitationRate)) mm/h"
         + (reading.humidity.map { "     Humidity \(Int($0.rounded()))%" } ?? "")
       layers.stringValue = WeatherScene(weather: reading).summary
       let time = DateFormatter.localizedString(
@@ -91,8 +91,8 @@ final class WeatherMenuCard: NSView {
         : "Effects follow your location while Live Weather is on."
       layers.stringValue =
         live
-        ? "Temporary scene · \(Preferences.effect.title)"
-        : "Manual scene · \(Preferences.effect.title)"
+        ? "Temporary scene · \(Preferences.manualScene.summary)"
+        : "Manual scene · \(Preferences.manualScene.summary)"
       updated.stringValue = "Refreshes every 15 minutes"
     }
     layoutSubtreeIfNeeded()

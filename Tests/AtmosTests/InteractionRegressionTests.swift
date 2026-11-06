@@ -107,7 +107,8 @@ final class InteractionRegressionTests: XCTestCase {
     sim.step(dt: 1 / 30, cursor: SIMD2(650, 410))
     let thrown = sim.particles.filter { $0.motion.w == 9 }
     XCTAssertFalse(thrown.isEmpty)
-    XCTAssertGreaterThan(thrown.map { $0.motion.y }.max() ?? 0, 200)
+    XCTAssertGreaterThan(thrown.map { abs($0.motion.x) }.max() ?? 0, 500,
+      "A horizontal sweep must transfer the pointer's horizontal momentum")
     XCTAssertLessThan(pool.volume, original)
     XCTAssertEqual(pool.volume + thrown.reduce(0) { $0 + $1.life.z }, original, accuracy: 0.1)
     for _ in 0..<180 { sim.step(dt: 1 / 30, cursor: SIMD2(-1000, -1000)) }
@@ -153,7 +154,7 @@ final class InteractionRegressionTests: XCTestCase {
       XCTAssertLessThan(sim.decorations.filter { $0.motion.w == 11 }.count, 100)
     }
     XCTAssertGreaterThan(targets.count, 1)
-    XCTAssertTrue(targets.isSubset(of: [0, 65, 400]))
+    XCTAssertTrue(targets.allSatisfy {y in [Float(0),65,400].contains {y >= $0 && y <= $0+28}})
     XCTAssertTrue(sim.decorations.contains { $0.motion.w == 12 && $0.life.w == 1 })
     sim.setEffect(.rain)
     sim.setEffect(.lightning)
@@ -173,7 +174,7 @@ final class InteractionRegressionTests: XCTestCase {
     sim.updateWindows([covered])
     for _ in 0..<1200 {
       sim.step(dt: 1 / 30, cursor: SIMD2(-1000, -1000))
-      if let target = sim.lastStrikeTarget { XCTAssertEqual(target.y, 0) }
+      if let target = sim.lastStrikeTarget { XCTAssertTrue((0...28).contains(target.y)) }
     }
     XCTAssertNotNil(sim.lastStrikeTarget)
   }
@@ -184,7 +185,7 @@ final class InteractionRegressionTests: XCTestCase {
       windDirection: 180, precipitation: 0, isDay: 0)
     reading.cloudCover = 35
     var scene = WeatherScene(weather: reading)
-    XCTAssertEqual(scene.primary, .fireflies)
+    XCTAssertEqual(scene.primary, .none)
     XCTAssertGreaterThan(scene.clouds, 0)
     reading = WeatherSnapshot(
       time: Date().timeIntervalSince1970, weatherCode: 2, temperature: 12, windSpeed: 8,

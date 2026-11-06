@@ -50,7 +50,7 @@ final class FluidAndTransitionTests: XCTestCase {
     sim.updateWindows([window()])
     let pool = sim.water[1]
     for x in stride(from: pool.origin.x, through: pool.origin.x + pool.width, by: 4) {
-      pool.hit(x: x, amount: 4, impulse: 0)
+      pool.hit(x: x, amount: 2.5, impulse: 0)
     }
     for _ in 0..<60 { sim.step(dt: 1 / 60, cursor: away) }
     return sim
@@ -128,11 +128,11 @@ final class FluidAndTransitionTests: XCTestCase {
         height = max(height, p.rect.y - top)
         upward = max(upward, p.motion.y)
       }
-      sawImpactSpray = sawImpactSpray || sim.particles.contains { $0.motion.w == 5 }
+      sawImpactSpray = sawImpactSpray || sim.ripples.contains { $0.strength > 0.5 }
     }
     XCTAssertGreaterThan(upward, 250)
     XCTAssertGreaterThan(height, 35)
-    XCTAssertTrue(sawImpactSpray, "Detached water must fall back and produce an impact splash")
+    XCTAssertTrue(sawImpactSpray, "Detached liquid returns momentum to the water field")
     XCTAssertTrue(sim.water.allSatisfy { $0.heights.allSatisfy { $0.isFinite && $0 >= 0 } })
   }
   func testWeatherRetirementKeepsParticlesAndAgesThemThreeTimesFaster() {

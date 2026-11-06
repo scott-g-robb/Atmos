@@ -16,25 +16,8 @@ struct Uniforms {
   var light = SIMD4<Float>(1, 1, 1, 1)
   var shadowTint = SIMD4<Float>(0, 0, 0, 0)
   var rim = SIMD4<Float>(0, 0, 0, 0)
-  /// The cursor's glow: where it is, how far it reaches and how bright it is.
-  var lantern = SIMD4<Float>(0, 0, 0, 0)
   /// How far everything is jolted: x and y. For a pile, z is how far along its window its snow has drifted.
   var shake = SIMD4<Float>(0, 0, 0, 0)
-  /// The pumpkins' candles: where each burns, how far its light reaches and how bright it is.
-  var pumpkins = (SIMD4<Float>(0, 0, 0, 0), SIMD4<Float>(0, 0, 0, 0), SIMD4<Float>(0, 0, 0, 0))
-}
-
-struct PumpkinUniforms {
-  var anchor: SIMD2<Float>
-  var width: Float
-  var seed: Float
-}
-
-struct SignUniforms {
-  var anchor: SIMD2<Float>
-  var size: SIMD2<Float>
-  var angle: Float
-  var ground: Float
 }
 
 enum RendererError: Error {
@@ -62,6 +45,8 @@ final class EffectScene {
     weather = try WeatherRenderer(
       device: device, format: format, size: SIMD2(simulation.width, simulation.height),
       reusing: previous?.weather)
+    simulation.botanicalStyle = effect.botanicalStyle
+    simulation.autumn = effect.botanicalStyle > 0
     weather.setEffect(effect)
   }
   func retire() {
@@ -81,12 +66,14 @@ final class Renderer: NSObject, MTKViewDelegate {
   var windowSurfaces: (CFTimeInterval) -> WindowUpdate? = { _ in nil }
   var sceneLight:
     (CFTimeInterval) -> (
-      light: SIMD3<Float>, shadowTint: SIMD4<Float>, rim: SIMD4<Float>, lantern: Float
-    ) = { _ in (SIMD3(repeating: 1), .zero, .zero, 0) }
+      light: SIMD3<Float>, shadowTint: SIMD4<Float>, rim: SIMD4<Float>
+    ) = { _ in (SIMD3(repeating: 1), .zero, .zero) }
   var prepareReflection: (MTLCommandBuffer) -> Void = { _ in }
   var nativeFrameRate = 60
   var budget = PowerBudget.full
   private let activity = FrameActivity()
+  private let airflow = WindField()
+  private var coverFrames: [SIMD4<Float>] = []
   private var reflectionMotion: ReflectionMotion?
   private var reflectionMotionUnavailable = false
   var captureFrameRate: Int {
@@ -127,6 +114,8 @@ final class Renderer: NSObject, MTKViewDelegate {
   private(set) var current: EffectScene
   private(set) var retiring: [EffectScene] = []
   private var scenes: [EffectScene] = []
+  private(set) var overlays: [EffectScene] = []
+  private var intensity = Snowfall.steady
   private let device: MTLDevice
   private let queue: MTLCommandQueue
   private let format: MTLPixelFormat
@@ -134,11 +123,10 @@ final class Renderer: NSObject, MTKViewDelegate {
   private var lastTime: CFTimeInterval = 0
   private var lastWindows: WindowUpdate?
   private var dockDrawn = false
-  private var ambient:
-    (light: SIMD3<Float>, shadowTint: SIMD4<Float>, rim: SIMD4<Float>, lantern: Float) = (
-      SIMD3(repeating: 1), .zero, .zero, 0
-    )
-  private var lanternAt = SIMD2<Float>(-10_000, -10_000)
+  private var ambient: (light: SIMD3<Float>, shadowTint: SIMD4<Float>, rim: SIMD4<Float>) = (
+    SIMD3(repeating: 1), .zero, .zero
+  )
+  private var pointer = SIMD2<Float>(-10_000, -10_000)
   private let epoch = CACurrentMediaTime()
 
   init(device: MTLDevice, pixelFormat: MTLPixelFormat, simulation: SnowSimulation) throws {
@@ -203,7 +191,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     current = next
     activity.wake(now: CACurrentMediaTime())
-    scenes = retiring + [current]
+    scenes = retiring + [current] + overlays
     let waterScenes = scenes.filter { $0.effect.hasWater }
     if let owner = waterScenes.first(where: { $0.weather.simulation.ownsWater })
       ?? waterScenes.first
@@ -220,14 +208,76 @@ final class Renderer: NSObject, MTKViewDelegate {
     resetClock()
   }
 
+  func setScene(_ description: WeatherScene, calm: Bool) {
+    setEffect(description.primary, calm: calm)
+    weather.scene = description
+    let wanted = [description.stacked, description.wildlife].compactMap { $0 }
+    for outgoing in overlays where !wanted.contains(outgoing.effect) {
+      if outgoing.hasContent {
+        outgoing.retire()
+        retiring.append(outgoing)
+      }
+    }
+    overlays.removeAll { !wanted.contains($0.effect) }
+    for effect in wanted where !overlays.contains(where: { $0.effect == effect }) {
+      let next: EffectScene
+      if let index = retiring.firstIndex(where: { $0.effect == effect }) {
+        next = retiring.remove(at: index)
+        next.resume()
+      } else {
+        let snow = SnowSimulation(
+          width: simulation.width, height: simulation.height, snowfall: .off)
+        snow.accumulates = simulation.accumulates
+        snow.thaws = simulation.thaws
+        snow.density = simulation.density
+        snow.walls = simulation.walls
+        snow.windowFrames = simulation.windowFrames
+        do {
+          next = try EffectScene(
+            effect: effect, device: device, queue: queue, format: format, simulation: snow,
+            reusing: current)
+        } catch {
+          NSLog("Atmos: overlay setup failed: \(error)")
+          continue
+        }
+      }
+      overlays.append(next)
+    }
+    scenes = retiring + [current] + overlays
+    for overlay in overlays {
+      var layer = WeatherScene(primary: overlay.effect)
+      layer.dynamics = description.dynamics
+      layer.strength = description.overlayStrength
+      overlay.weather.simulation.scene = layer
+      overlay.weather.simulation.density = weather.density
+      overlay.weather.simulation.reducedMotion = calm
+      overlay.weather.contentTop = contentTop
+    }
+    setIntensity(intensity)
+    if let lastWindows { updateWindows(lastWindows, onWindows: accumulatesOnWindows) }
+  }
+
+  func configureLayers(_ change: (SnowSimulation, WeatherSimulation) -> Void) {
+    for scene in scenes { change(scene.snow.simulation, scene.weather.simulation) }
+  }
+
   func setIntensity(_ intensity: Snowfall) {
-    simulation.snowfall = effect.usesSnowSimulation ? intensity : .off
+    self.intensity = intensity
+    simulation.snowfall =
+      effect.usesSnowSimulation
+      ? (weather.scene.dynamics != nil && intensity != .off ? .steady : intensity) : .off
     weather.intensity = intensity
+    for overlay in overlays {
+      overlay.snow.simulation.snowfall =
+        overlay.effect.usesSnowSimulation
+        ? (weather.scene.dynamics != nil && intensity != .off ? .steady : intensity) : .off
+      overlay.weather.simulation.intensity = overlay.effect.usesSnowSimulation ? .off : intensity
+    }
   }
   func updateWindows(_ update: WindowUpdate, onWindows: Bool) {
     lastWindows = update
     accumulatesOnWindows = onWindows
-    for scene in [current] + retiring {
+    for scene in scenes {
       scene.snow.simulation.updateWindows(
         onWindows ? update.surfaces : [], interval: update.interval, parked: update.parked,
         elsewhere: update.elsewhere, sliding: update.sliding)
@@ -240,6 +290,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
   }
   func setCoverFrames(_ frames: [SIMD4<Float>]) {
+    coverFrames = frames
     for scene in scenes {
       scene.snow.simulation.windowFrames = frames
       scene.weather.windowOccluders = Array(frames.prefix(128))
@@ -322,8 +373,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     #if DEBUG
       measured = DebugMetrics.end("windows", since: measured)
     #endif
-    lanternAt = cursorLocation()
-    activity.observeCursor(lanternAt, size: SIMD2(simulation.width, simulation.height), now: now)
+    pointer = cursorLocation()
+    activity.observeCursor(pointer, size: SIMD2(simulation.width, simulation.height), now: now)
     ambient = sceneLight(now)
     #if DEBUG
       measured = DebugMetrics.end("capture_input", since: measured)
@@ -341,21 +392,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     #endif
     let dt = lastTime > 0 ? Float(min(now - lastTime, 0.05)) : 1 / Float(nativeFrameRate)
     lastTime = now
-    for scene in scenes {
-      if scene.effect.usesSnowSimulation || scene.snow.simulation.spriteCount > 0 {
-        _ = scene.snow.simulation.step(dt: dt, cursor: lanternAt)
-      }
-      if !scene.effect.usesSnowSimulation || scene.weather.simulation.scene.clouds > 0
-        || scene.weather.simulation.scene.sunlight > 0
-        || scene.weather.simulation.scene.fireflies > 0 || scene.weather.simulation.hasContent
-      {
-        scene.weather.simulation.step(dt: dt, cursor: lanternAt)
-      }
-    }
-    let outgoingCount = retiring.count
-    retiring.removeAll { $0.isEmpty }
-    if outgoingCount != retiring.count { scenes = retiring + [current] }
-    if current.isEmpty && retiring.isEmpty {
+    step(dt: dt, cursor: pointer, now: now)
+    if current.isEmpty && retiring.isEmpty && overlays.allSatisfy(\.isEmpty) {
       rest()
       return
     }
@@ -401,6 +439,48 @@ final class Renderer: NSObject, MTKViewDelegate {
     #if DEBUG
       _ = DebugMetrics.end("encode_submit", since: measured)
     #endif
+  }
+
+  /// Shared native-rate step, also used for isolated simulation and rendering measurements.
+  func step(dt: Float, cursor: SIMD2<Float>, now: Double) {
+    let climate = weather.dynamics ?? weather.scene.dynamics
+    let fieldWind=climate?.wind(at:weather.elapsed) ?? weather.wind
+    let hasAirflow=climate != nil || abs(fieldWind)>0.01
+    if hasAirflow {
+      airflow.update(size:weather.size,windows:coverFrames,wind:fieldWind,
+        turbulence:climate?.turbulence ?? abs(fieldWind)*0.12,time:now)
+    }
+    // Step water first, then let every drifting layer collide with the same live or drying puddles.
+    for scene in scenes {
+      scene.weather.simulation.airflow = hasAirflow ? airflow : nil
+      scene.weather.simulation.step(dt: dt, cursor: cursor)
+    }
+    let pools = scenes.filter { $0.effect.hasWater && $0.weather.simulation.ownsWater }
+      .flatMap { $0.weather.simulation.water }
+    for scene in scenes {
+      scene.snow.simulation.waterSurfaces = pools
+      scene.snow.simulation.airflow = hasAirflow ? airflow : nil
+      scene.weather.simulation.airflow = hasAirflow ? airflow : nil
+      let snow = scene.snow.simulation
+      let weather = scene.weather.simulation
+      if let dynamics = weather.dynamics ?? weather.scene.dynamics {
+        snow.weatherWind = dynamics.wind(at: weather.elapsed)
+        snow.weatherStrength =
+          scene.effect == .snow ? dynamics.precipitationStrength : weather.scene.strength
+        snow.meltScale = scene.effect == .snow ? max(0.15, min(3, (dynamics.feelsLike + 3) / 8)) : 1
+      } else {
+        snow.weatherStrength = 1
+        snow.meltScale = 1
+      }
+      if scene.effect.usesSnowSimulation || scene.snow.simulation.spriteCount > 0
+        || scene.snow.simulation.hasSnow
+      {
+        _ = scene.snow.simulation.step(dt: dt, cursor: cursor)
+      }
+    }
+    let outgoingCount = retiring.count
+    retiring.removeAll { $0.isEmpty }
+    if outgoingCount != retiring.count { scenes = retiring + [current] + overlays }
   }
 
   /// One shared pass draws water and atmosphere at the display's native rate.
@@ -453,7 +533,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         || scene.snow.simulation.spriteCount > 0
       {
         scene.snow.encode(
-          with: encoder, ambient: ambient, lanternAt: lanternAt, scale: scale, time: time)
+          with: encoder, ambient: ambient, scale: scale, time: time,
+          includeGround: dockOverlay == nil)
       }
     }
   }

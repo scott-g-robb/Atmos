@@ -8,6 +8,7 @@ unsafe extern "C" {
     fn cosf(x: f32) -> f32;
     fn expf(x: f32) -> f32;
     fn sqrtf(x: f32) -> f32;
+    fn atan2f(y: f32, x: f32) -> f32;
     #[cfg(not(test))]
     fn abort() -> !;
 }
@@ -82,6 +83,8 @@ pub struct Impact {
     pub impulse: f32,
     pub surface_index: u32,
     pub kind: u32,
+    pub vx: f32,
+    pub vy: f32,
 }
 #[repr(C)]
 pub struct StepResult {
@@ -144,6 +147,7 @@ pub unsafe extern "C" fn sh_step_particles(
         }
     }
     let mut live_flies = 0;
+    let mut live_butterflies = 0;
     let mut out = 0;
     let mut event_count = 0;
     let mut trails = [Particle::default(); 128];
@@ -162,6 +166,12 @@ pub unsafe extern "C" fn sh_step_particles(
             }
             live_flies += 1;
         }
+        if kind == 13 {
+            if live_butterflies >= 12 {
+                continue;
+            }
+            live_butterflies += 1;
+        }
         if kind == 6 {
             particles[out] = p;
             out += 1;
@@ -174,7 +184,7 @@ pub unsafe extern "C" fn sh_step_particles(
         let mut vy = p.motion[1];
         // A stationary pointer cannot transfer momentum. Avoid segment projection
         // and square roots for every particle when there is no interaction.
-        if kind != 2 && cursor_speed > 6.0 {
+        if kind != 2 && kind != 9 && cursor_speed > 6.0 {
             let sx = s.cursor_x - s.previous_x;
             let sy = s.cursor_y - s.previous_y;
             let fraction = (((x - s.previous_x) * sx + (y - s.previous_y) * sy)
@@ -194,12 +204,22 @@ pub unsafe extern "C" fn sh_step_particles(
         }
         match kind {
             0 => {
-                let gust = if s.effect == 2 {
+                let gust = if s.effect == 1 {
+                    0.0
+                } else if s.effect == 2 {
                     sin(s.time * 0.57) * 75.0 + 70.0
                 } else {
                     12.0
                 };
-                vx += (s.wind + gust + sin(s.time * 0.7 + seed * 9.0) * 12.0 - vx)
+                vx += (s.wind
+                    + gust
+                    + sin(s.time * 0.7 + seed * 9.0)
+                        * (if s.effect == 1 {
+                            s.wind.abs() * 0.05
+                        } else {
+                            12.0
+                        })
+                    - vx)
                     * (dt * 1.8).min(1.0);
             }
             1 | 5 | 9 => {
@@ -207,12 +227,12 @@ pub unsafe extern "C" fn sh_step_particles(
                 vx *= drag;
             }
             2 => {
-                vx += (s.wind * 0.025 + sin(s.time * 0.13 + seed * 17.0) * 7.0 - vx)
+                vx += (s.wind * 0.16 + sin(s.time * 0.13 + seed * 17.0) * 7.0 - vx)
                     * (dt * 0.65).min(1.0);
                 vy += (cos(s.time * 0.18 + seed * 19.0) * 2.5 - vy) * (dt * 0.65).min(1.0);
             }
             3 => {
-                vx += (sin(s.time * 0.27 + seed * 14.0) * 15.0 + s.wind * 0.025 - vx) * dt;
+                vx += (sin(s.time * 0.27 + seed * 14.0) * 15.0 + s.wind * 0.10 - vx) * dt;
                 vy += (6.0 + cos(s.time * 0.41 + seed * 23.0) * 9.0 - vy) * dt;
             }
             4 => {
@@ -242,9 +262,34 @@ pub unsafe extern "C" fn sh_step_particles(
                     vy *= 105.0 / speed;
                 }
             }
+            13 => {
+                vx += (sin(s.time * 0.43 + seed * 31.0) * 42.0 + s.wind * 0.10 - vx) * dt * 1.4;
+                vy += (cos(s.time * 0.67 + seed * 19.0) * 24.0
+                    + sin(s.time * 1.7 + seed * 9.0) * 12.0
+                    - vy)
+                    * dt
+                    * 1.6;
+            }
             _ => {}
         }
-        let slow = if (2..=4).contains(&kind) {
+        if kind == 13 && len(vx, vy) > 2.0 {
+            let target = unsafe { atan2f(-vx, vy) };
+            let mut delta = target - p.life[3];
+            while delta > core::f32::consts::PI {
+                delta -= core::f32::consts::TAU;
+            }
+            while delta < -core::f32::consts::PI {
+                delta += core::f32::consts::TAU;
+            }
+            p.life[3] += delta * (dt * 3.5).min(1.0);
+            if p.life[3] > core::f32::consts::PI {
+                p.life[3] -= core::f32::consts::TAU;
+            }
+            if p.life[3] < -core::f32::consts::PI {
+                p.life[3] += core::f32::consts::TAU;
+            }
+        }
+        let slow = if (2..=4).contains(&kind) || kind == 13 {
             s.motion_scale
         } else {
             1.0
@@ -263,7 +308,7 @@ pub unsafe extern "C" fn sh_step_particles(
         }
         p.motion[0] = vx;
         p.motion[1] = vy;
-        if kind == 2 || kind == 3 || kind == 4 {
+        if kind == 2 || kind == 3 || kind == 4 || kind == 13 {
             // Keep atmosphere on the display. Wide mist billows wrap continuously rather than flying away.
             let margin = if kind == 2 {
                 p.rect[2] * 0.5 + 5.0
@@ -286,7 +331,7 @@ pub unsafe extern "C" fn sh_step_particles(
         let mut landed = false;
         if (kind == 0 || kind == 1 || kind == 5 || kind == 9)
             && vy < 0.0
-            && (kind != 9 || p.life[0] > 0.08)
+            && (kind != 9 || p.life[0] > 0.012)
         {
             let mut best = None;
             let mut top = -f32::MAX;
@@ -336,10 +381,10 @@ pub unsafe extern "C" fn sh_step_particles(
                         } else if kind == 5 {
                             0.4
                         } else {
-                            2.5
+                            (vy.abs() * 0.004).clamp(0.4, 8.0)
                         },
                         surface_index: surface as u32,
-                        kind,
+                        kind, vx, vy,
                     };
                     event_count += 1;
                 }
@@ -410,7 +455,8 @@ pub unsafe extern "C" fn sh_step_water(
     let steps = ((dt.min(0.05) * 120.0) as usize + 1).min(7);
     let h = dt.min(0.05) / steps as f32;
     let damping = exp(-h * 3.0);
-    let diffusion = (h * 3.0).min(0.24);
+    // Surface pressure equalizes displaced water within a fraction of a second.
+    let diffusion = (h * 90.0).min(0.24);
     let mut current: &mut [f32] = original;
     let mut next: &mut [f32] = spare;
     for _ in 0..steps {
@@ -418,7 +464,7 @@ pub unsafe extern "C" fn sh_step_water(
             let left = i.saturating_sub(1);
             let right = (i + 1).min(count - 1);
             speed[i] = (speed[i] + (wave[left] + wave[right] - 2.0 * wave[i]) * 180.0 * h
-                - wave[i] * 5.0 * h)
+                - wave[i] * 14.0 * h)
                 * damping;
             next[i] = (current[i]
                 + (current[left] + current[right] - 2.0 * current[i]) * diffusion
@@ -455,7 +501,7 @@ mod tests {
         assert_eq!(core::mem::align_of::<Particle>(), 16);
         assert_eq!(core::mem::size_of::<Step>(), 60);
         assert_eq!(core::mem::size_of::<Surface>(), 24);
-        assert_eq!(core::mem::size_of::<Impact>(), 24);
+        assert_eq!(core::mem::size_of::<Impact>(), 32);
     }
     #[test]
     fn water_conserves_volume_and_stays_finite() {
@@ -717,6 +763,7 @@ pub unsafe extern "C" fn sh_transport_water(
     count: usize,
     spacing: f32,
     dt: f32,
+    retention_depth: f32,
 ) -> WaterOutflow {
     let mut out = WaterOutflow::default();
     if count < 3 || spacing <= 0.0 || !dt.is_finite() || dt <= 0.0 {
@@ -729,16 +776,22 @@ pub unsafe extern "C" fn sh_transport_water(
     let max_speed = v.iter().fold(60.0f32, |a, b| a.max(b.abs()));
     let steps = ((dt.min(0.05) * max_speed / (spacing * 0.38)) as usize + 1).min(48);
     let h = dt.min(0.05) / steps as f32;
-    let damping = exp(-h * 1.15);
+    let damping = exp(-h * 8.0);
     for _ in 0..steps {
         mass.fill(0.0);
         momentum.fill(0.0);
         for i in 0..count {
             let left = i.saturating_sub(1);
             let right = (i + 1).min(count - 1);
-            v[i] = ((v[i] - (d[right] - d[left]) * 180.0 * h / (2.0 * spacing)) * damping)
+            v[i] = ((v[i] - (d[right] - d[left]) * 1900.0 * h / (2.0 * spacing)) * damping)
                 .clamp(-1200.0, 1200.0);
         }
+        // Capillary pinning holds a shallow resting film. Once the edge head exceeds
+        // the meniscus, gravity opens it; pressure replenishes the edge from the pool.
+        let left_head = (d[0] - retention_depth).max(0.0);
+        let right_head = (d[count-1] - retention_depth).max(0.0);
+        if left_head > 0.0 { v[0] = v[0].min(-unsafe { sqrtf(1900.0 * left_head) }); }
+        if right_head > 0.0 { v[count-1] = v[count-1].max(unsafe { sqrtf(1900.0 * right_head) }); }
         for i in 0..count {
             let amount = d[i].max(0.0);
             let fraction = (v[i].abs() * h / spacing).min(0.42);
@@ -746,7 +799,7 @@ pub unsafe extern "C" fn sh_transport_water(
             mass[i] += amount - flux;
             momentum[i] += (amount - flux) * v[i];
             let edge = (i == 0 && v[i] < 0.0) || (i == count - 1 && v[i] > 0.0);
-            if edge && v[i].abs() >= 25.0 {
+            if edge && (v[i].abs() >= 80.0 || d[i] > retention_depth) {
                 if i == 0 {
                     out.left += flux;
                     out.left_momentum += flux * v[i];
@@ -773,6 +826,332 @@ pub unsafe extern "C" fn sh_transport_water(
             } else {
                 0.0
             };
+        }
+        // Incompressible pressure projection: a thin ledge cannot store unlimited
+        // vertical columns. Excess volume travels through neighbouring cells to
+        // the nearest open boundary. It is returned with flux momentum, not deleted.
+        for side in 0..2 {
+            for k in 0..count {
+                let i=if side==0 { count-1-k } else { k };
+                if (i<count/2) != (side==0) { continue; }
+                let excess=(d[i]-retention_depth).max(0.0);
+                if excess<=0.0 {continue;}
+                d[i]-=excess;
+                let speed=unsafe { sqrtf(2.0*1900.0*excess) }.max(v[i].abs());
+                if i==0 {
+                    out.left+=excess; out.left_momentum-=excess*speed;
+                } else if i==count-1 {
+                    out.right+=excess; out.right_momentum+=excess*speed;
+                } else {
+                    let j=if side==0 {i-1} else {i+1};
+                    let total=d[j]+excess;
+                    v[j]=(v[j]*d[j]+v[i]*excess)/total.max(0.0001);
+                    d[j]=total;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Local airflow correction after the original integrator. No allocation or change to the particle ABI.
+/// # Safety
+/// `particles` spans count initialized particles; cells spans columns*rows float4s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sh_apply_airflow(
+    particles: *mut Particle,
+    count: usize,
+    cells: *const [f32; 4],
+    columns: usize,
+    rows: usize,
+    spacing: f32,
+    base: f32,
+    dt: f32,
+) {
+    if count == 0
+        || particles.is_null()
+        || cells.is_null()
+        || columns < 2
+        || rows < 2
+        || spacing <= 0.0
+        || !dt.is_finite()
+        || dt <= 0.0
+    {
+        return;
+    }
+    let particles = unsafe { slice::from_raw_parts_mut(particles, count) };
+    let cells = unsafe { slice::from_raw_parts(cells, columns * rows) };
+    for p in particles {
+        let kind = p.motion[3] as u32;
+        if kind == 6 {
+            continue;
+        }
+        let gx = (p.rect[0] / spacing).clamp(0.0, columns as f32 - 1.001);
+        let gy = (p.rect[1] / spacing).clamp(0.0, rows as f32 - 1.001);
+        let x = gx as usize;
+        let y = gy as usize;
+        let fx = gx - x as f32;
+        let fy = gy - y as f32;
+        let mut flow = [0.0; 2];
+        for axis in 0..2 {
+            let a =
+                cells[y * columns + x][axis] * (1.0 - fx) + cells[y * columns + x + 1][axis] * fx;
+            let b = cells[(y + 1) * columns + x][axis] * (1.0 - fx)
+                + cells[(y + 1) * columns + x + 1][axis] * fx;
+            flow[axis] = a * (1.0 - fy) + b * fy;
+        }
+        let (follow, existing) = match kind {
+            0 => (1.8, 1.0),
+            2 => (0.65, 0.16),
+            3 => (1.0, 0.10),
+            4 => (0.14, 0.0),
+            13 => (0.35, 0.10),
+            _ => (0.18, 0.0),
+        };
+        p.motion[0] += (flow[0] - base * existing) * (dt * follow).min(1.0);
+        p.motion[1] += flow[1] * dt * follow * if kind == 0 { 0.2 } else { 0.65 };
+    }
+}
+
+#[cfg(test)]
+mod airflow_tests {
+    use super::*;
+    #[test]
+    fn local_flow_drives_different_motion_without_changing_particle_mass() {
+        let mut particles = [Particle::default(); 2];
+        particles[0].rect = [0.0, 0.0, 3.0, 20.0];
+        particles[1].rect = [48.0, 0.0, 3.0, 20.0];
+        particles[0].life[2] = 2.0;
+        particles[1].life[2] = 3.0;
+        let flow = [
+            [100.0, 4.0, 1.0, 0.0],
+            [20.0, -4.0, 0.2, 0.0],
+            [100.0, 4.0, 1.0, 0.0],
+            [20.0, -4.0, 0.2, 0.0],
+        ];
+        unsafe {
+            sh_apply_airflow(
+                particles.as_mut_ptr(),
+                2,
+                flow.as_ptr(),
+                2,
+                2,
+                48.0,
+                0.0,
+                1.0 / 120.0,
+            );
+        }
+        assert!(particles[0].motion[0] > particles[1].motion[0] * 4.0);
+        assert!(particles[0].motion[1] > 0.0 && particles[1].motion[1] < 0.0);
+        assert_eq!(particles[0].life[2], 2.0);
+        assert_eq!(particles[1].life[2], 3.0);
+    }
+    #[test]
+    fn empty_flow_is_safe() {
+        unsafe {
+            sh_apply_airflow(
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null(),
+                0,
+                0,
+                0.0,
+                0.0,
+                0.0,
+            );
+        }
+    }
+}
+
+
+/// Interacting free liquid: local pressure projection, cohesion, viscosity and a
+/// solid pointer boundary. A spatial hash bounds neighbourhood work. All transfers
+/// conserve pair momentum; no splash count, launch speed or animation is selected.
+/// # Safety
+/// `particles` spans count initialized particles (at most 8192).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sh_couple_liquid(particles:*mut Particle,count:usize,dt:f32,
+    cx:f32,cy:f32,cvx:f32,cvy:f32) {
+    if count==0 || count>8192 || particles.is_null() || dt<=0.0 {return;}
+    let p=unsafe {slice::from_raw_parts_mut(particles,count)};
+    let liquid_count=p.iter().filter(|item|item.motion[3]==9.0).count();
+    if liquid_count==0 {return;}
+    let foam_decay=exp(-dt*6.0);
+    let mut counts=[0usize;4096];let mut starts=[0usize;4097];
+    let mut cursor=[0usize;4096];let mut members=[0u16;8192];
+    fn hash(x:i32,y:i32)->usize {((x.wrapping_mul(73856093)^y.wrapping_mul(19349663)) as usize)&4095}
+    for pass in 0..if liquid_count>2048 {2} else {3} {
+        counts.fill(0);
+        for item in p.iter_mut() {
+            if item.motion[3]!=9.0 {continue;}
+            if pass==0 {item.life[3]*=foam_decay;}
+            counts[hash((item.rect[0]/6.0) as i32,(item.rect[1]/6.0) as i32)]+=1;
+        }
+        starts[0]=0;
+        for cell in 0..4096 {starts[cell+1]=starts[cell]+counts[cell];cursor[cell]=starts[cell];}
+        for i in 0..count {
+            if p[i].motion[3]!=9.0 {continue;}
+            let cell=hash((p[i].rect[0]/6.0) as i32,(p[i].rect[1]/6.0) as i32);
+            members[cursor[cell]]=i as u16;cursor[cell]+=1;
+        }
+        for i in 0..count {
+            if p[i].motion[3]!=9.0 {continue;}
+            let gx=(p[i].rect[0]/6.0) as i32;let gy=(p[i].rect[1]/6.0) as i32;
+            for yy in gy-1..=gy+1 {for xx in gx-1..=gx+1 {
+                let cell=hash(xx,yy);let population=counts[cell];
+                let probes=if population>16 {if liquid_count>2048 {4} else {6}} else {population};
+                if probes==0 {continue;}
+                // Exact for sparse cells. In crowded cells sample uniformly across
+                // the entire contiguous population, never an unbounded linked list.
+                // Paired updates retain momentum; all particles still render/move.
+                let phase=(i.wrapping_mul(13)+pass*7)%population;
+                let weight=(population as f32/probes as f32).min(4.0);
+                for k in 0..probes {
+                    // Sparse cells use every member; crowded cells use the same
+                    // four/six uniform samples. The offset wraps at most once.
+                    let stride=if probes==population {k} else if probes==4 {k*population/4} else {k*population/6};
+                    let offset=phase+stride;
+                    let j=members[starts[cell]+if offset>=population {offset-population} else {offset}] as usize;
+                    if j<=i {continue;}
+                    let dx=p[j].rect[0]-p[i].rect[0];let dy=p[j].rect[1]-p[i].rect[1];
+                    let d2=dx*dx+dy*dy;
+                    if d2<0.000001 || d2>=36.0 {continue;}
+                    if (p[j].rect[0]/6.0) as i32!=xx || (p[j].rect[1]/6.0) as i32!=yy {continue;}
+                    let rest=(p[i].rect[2]+p[j].rect[2])*0.43;
+                    let reach=(rest*3.0).min(6.0);
+                    if d2>=reach*reach {continue;}
+                    let d=unsafe {sqrtf(d2)};let nx=dx/d;let ny=dy/d;
+                    let mi=p[i].life[2].max(0.001);let mj=p[j].life[2].max(0.001);
+                    let wi=mj/(mi+mj);let wj=mi/(mi+mj);
+                    let correction=if d<rest {(d-rest)*0.45*weight} else {(d-rest)*dt*18.0*weight};
+                    let correction=correction.clamp(-1.2,0.65);
+                    p[i].rect[0]+=nx*correction*wi;p[i].rect[1]+=ny*correction*wi;
+                    p[j].rect[0]-=nx*correction*wj;p[j].rect[1]-=ny*correction*wj;
+                    let dv=correction/dt.max(0.004)*0.65;
+                    p[i].motion[0]+=nx*dv*wi;p[i].motion[1]+=ny*dv*wi;
+                    p[j].motion[0]-=nx*dv*wj;p[j].motion[1]-=ny*dv*wj;
+                    if pass==0 {
+                        let sx=p[j].motion[0]-p[i].motion[0];let sy=p[j].motion[1]-p[i].motion[1];
+                        let shear2=sx*sx+sy*sy;
+                        let aeration=if shear2>14400.0 {((unsafe {sqrtf(shear2)}-120.0)/550.0).clamp(0.0,1.0)} else {0.0};
+                        p[i].life[3]=p[i].life[3].max(aeration);p[j].life[3]=p[j].life[3].max(aeration);
+                        for axis in 0..2 {
+                            let visc=(p[j].motion[axis]-p[i].motion[axis])*(1.0-d/reach)*(0.07*weight).min(0.2);
+                            p[i].motion[axis]+=visc*wi;p[j].motion[axis]-=visc*wj;
+                        }
+                    }
+                }
+            }}
+            let dx=p[i].rect[0]-cx;let dy=p[i].rect[1]-cy;let d2=dx*dx+dy*dy;
+            let radius=11.0+p[i].rect[2]*0.5;
+            if d2<radius*radius && d2>0.000001 {
+                let d=unsafe {sqrtf(d2)};
+                let nx=dx/d;let ny=dy/d;
+                p[i].rect[0]=cx+nx*radius;p[i].rect[1]=cy+ny*radius;
+                let closing=(p[i].motion[0]-cvx)*nx+(p[i].motion[1]-cvy)*ny;
+                if closing<0.0 {
+                    p[i].motion[0]-=closing*nx;p[i].motion[1]-=closing*ny;
+                    p[i].life[3]=p[i].life[3].max(((-closing-100.0)/500.0).clamp(0.0,1.0));
+                }
+            }
+        }
+    }
+}
+
+/// # Safety
+/// Input spans count particles (<=8192); output spans count*8 float4 values,
+/// scratch spans 4096*9 float4 values and is reused by the caller between frames.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sh_liquid_field(particles:*const Particle,count:usize,output:*mut [f32;4],scratch:*mut [f32;4]) {
+    if count==0 || count>8192 || particles.is_null() || output.is_null() || scratch.is_null() {return;}
+    let p=unsafe {slice::from_raw_parts(particles,count)};
+    if !p.iter().any(|item| item.motion[3]==9.0) {return;}
+    let field=unsafe {slice::from_raw_parts_mut(output,count*8)};
+    let mut heads=[-1i32;4096];let mut next=[-1i32;8192];
+    fn hash(x:i32,y:i32)->usize {((x.wrapping_mul(73856093)^y.wrapping_mul(19349663)) as usize)&4095}
+    for i in 0..count {if p[i].motion[3]==9.0 {
+        let h=hash((p[i].rect[0]/4.0) as i32,(p[i].rect[1]/4.0) as i32);
+        next[i]=heads[h];heads[h]=i as i32;
+    }}
+    // Dense liquid samples share a small spatial neighbourhood. Cache nine
+    // candidates per small cell, then exclude the sample itself when writing
+    // its eight neighbours. This preserves particle count and native-rate motion.
+    let mut keys=[[i32::MIN;2];4096];
+    let cache=unsafe {slice::from_raw_parts_mut(scratch,4096*9)};
+    for i in 0..count {
+        if p[i].motion[3]!=9.0 {continue;}
+        let cell=[(p[i].rect[0]/1.5) as i32,(p[i].rect[1]/1.5) as i32];
+        let entry=hash(cell[0],cell[1]);
+        if keys[entry]!=cell {
+            keys[entry]=cell;for slot in 0..9 {cache[entry*9+slot]=[0.0;4];}
+            let centre=[(cell[0] as f32+0.5)*1.5,(cell[1] as f32+0.5)*1.5];
+            let x=(centre[0]/4.0) as i32;let y=(centre[1]/4.0) as i32;
+            let mut distances=[36.0f32;9];let mut indices=[-1i32;9];let mut slot=0;
+            for yy in y-1..=y+1 {for xx in x-1..=x+1 {
+                let mut node=heads[hash(xx,yy)];
+                while node>=0 {
+                    let j=node as usize;node=next[j];
+                    // Hash collisions are not extra fluid samples.
+                    if (p[j].rect[0]/4.0) as i32!=xx || (p[j].rect[1]/4.0) as i32!=yy {continue;}
+                    let dx=p[j].rect[0]-centre[0];let dy=p[j].rect[1]-centre[1];let d=dx*dx+dy*dy;
+                    if d<distances[slot] || (d==distances[slot] && j as i32>indices[slot] && d<36.0) {
+                        distances[slot]=d;cache[entry*9+slot]=[p[j].rect[0],p[j].rect[1],p[j].rect[2]*0.5,1.0];
+                        indices[slot]=j as i32;
+                        slot=0;for k in 1..9 {if distances[k]>distances[slot] || (distances[k]==distances[slot] && indices[k]<indices[slot]) {slot=k;}}
+                    }
+                }
+            }}
+            for n in 1..9 {
+                let mut k=n;
+                while k>0 && (distances[k]<distances[k-1] || (distances[k]==distances[k-1] && indices[k]>indices[k-1])) {
+                    distances.swap(k,k-1);indices.swap(k,k-1);cache.swap(entry*9+k,entry*9+k-1);k-=1;
+                }
+            }
+        }
+        let mut k=0;
+        for candidate in cache[entry*9..entry*9+9].iter().copied() {
+            if k==8 {break;}
+            if candidate[3]>0.5 && (candidate[0]-p[i].rect[0]).abs()<0.0001 && (candidate[1]-p[i].rect[1]).abs()<0.0001 {continue;}
+            field[i*8+k]=candidate;k+=1;
+        }
+        while k<8 {field[i*8+k]=[0.0;4];k+=1;}
+    }
+}
+
+/// Merge samples occupying the same four-point cell, with stable ordering and
+/// exactly the existing mass, momentum and rendered-area rules. Fixed storage
+/// avoids rebuilding a heap-allocated map during a full-puddle interaction.
+/// # Safety
+/// `particles` spans count initialized particles (at most 8192).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sh_coalesce_liquid(particles:*mut Particle,count:usize)->usize {
+    if count==0 || count>8192 || particles.is_null() {return count;}
+    let p=unsafe {slice::from_raw_parts_mut(particles,count)};
+    let mut heads=[-1i32;4096];let mut next=[-1i32;8192];
+    let mut keys=[[0i32;2];8192];let mut out=0;
+    for i in 0..count {
+        let sample=p[i];
+        if sample.motion[3]!=9.0 {p[out]=sample;out+=1;continue;}
+        fn cell(value:f32)->i32 {
+            let scaled=value*0.25;let integer=scaled as i32;
+            if scaled<integer as f32 {integer.saturating_sub(1)} else {integer}
+        }
+        let key=[cell(sample.rect[0]),cell(sample.rect[1])];
+        let hash=((key[0].wrapping_mul(73856093)^key[1].wrapping_mul(19349663)) as usize)&4095;
+        let mut node=heads[hash];
+        while node>=0 && keys[node as usize]!=key {node=next[node as usize];}
+        if node>=0 {
+            let kept=&mut p[node as usize];
+            let mass=kept.life[2]+sample.life[2];let t=sample.life[2]/mass.max(0.001);
+            for axis in 0..2 {
+                kept.rect[axis]+=(sample.rect[axis]-kept.rect[axis])*t;
+                kept.motion[axis]+=(sample.motion[axis]-kept.motion[axis])*t;
+            }
+            kept.life[2]=mass;kept.life[3]=kept.life[3].max(sample.life[3]);
+            let diameter=(unsafe {sqrtf(mass)}*2.3).min(3.6);
+            kept.rect[2]=diameter;kept.rect[3]=diameter;
+        } else {
+            p[out]=sample;keys[out]=key;next[out]=heads[hash];heads[hash]=out as i32;out+=1;
         }
     }
     out

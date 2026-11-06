@@ -12,14 +12,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var snowOnWindows = true
   private var behindWindows = false
   private var snowfallHeld = false
-  private var halloween = false
   private var statusItem: NSStatusItem!
   private let snowfallSlider = SnowfallSlider()
+  private let windSlider = WindSlider()
+  private var windHeader: NSMenuItem!
+  private var effectiveWind: Float { Preferences.liveWeather ? weather.current?.horizontalWind ?? 0 : Float(Preferences.manualWindSpeed)*2.4 }
   private var accumulateItem: NSMenuItem!
   private var meltItem: NSMenuItem!
   private var snowOnWindowsItem: NSMenuItem!
   private var clearItem: NSMenuItem!
-  private var halloweenItem: NSMenuItem!
   private var effectItems: [WeatherEffect: NSMenuItem] = [:]
   private var liveItem: NSMenuItem!
   private let weatherCard = WeatherMenuCard()
@@ -51,12 +52,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var sessionInactive = false
   private var welcome: WelcomeController?
   private let power = PowerMonitor()
-  private var halloweenTimer: Timer?
+  private var liveSceneTimer: Timer?
   private let weather = LiveWeather()
   private var scene: WeatherScene {
-    weather.current.map(WeatherScene.init(weather:)) ?? WeatherScene(primary: Preferences.effect)
+    weather.current.map { WeatherScene(weather: $0) }
+      ?? Preferences.manualScene
   }
   private var effect: WeatherEffect { scene.primary }
+  private var statusEffect: WeatherEffect {
+    effect == .none ? scene.stacked ?? scene.wildlife ?? .none : effect
+  }
   private var effectiveIntensity: Snowfall {
     Preferences.liveWeather ? weather.current?.intensity ?? .light : snowfall
   }
@@ -87,11 +92,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       return
     }
 
-    statusItem = makeStatusItem()
+    makeStatusItem()
     weather.changed = { [weak self] in self?.applyWeather() }
     weather.setEnabled(Preferences.liveWeather)
     updateStatusIcon()
-    refreshHalloween()
     updateActivity()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
       self?.prepareReflectionsIfNeeded()
@@ -123,10 +127,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       {
         snow.simulation.snowfallHeld = snowfallHeld
         snow.simulation.snowfallReleased = { [weak self] in self?.releaseSnowfall() }
-        snow.halloween = halloween
         snow.setScene(scene)
         snow.setIntensity(effectiveIntensity)
-        snow.setWind(weather.current?.horizontalWind ?? 0)
+        snow.setWind(effectiveWind,automatic:Preferences.liveWeather)
         snow.activityChanged = { [weak self] in self?.updateActivity() }
         snow.apply(power.budget)
         screens.append(snow)
@@ -166,9 +169,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   // MARK: - Menu
 
-  private func makeStatusItem() -> NSStatusItem {
+  @discardableResult
+  func makeStatusItem() -> NSStatusItem {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-    item.button?.image = Self.icon(halloween: false)
+    statusItem = item
+    item.button?.image = NSImage(
+      systemSymbolName: statusEffect.symbol, accessibilityDescription: "Atmos")
 
     let menu = NSMenu()
     menu.delegate = self
@@ -180,9 +186,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       "Blend effects to match current local conditions. Choose a scene to return to manual control."
     let modes = NSMenu()
     modes.autoenablesItems = false
+    modes.delegate = self
     for (title, effects) in [
-      ("Precipitation", [WeatherEffect.snow, .rain, .drizzle, .storm, .lightning, .sleet, .hail]),
-      ("Atmosphere", [.mist, .clouds, .sunlight]), ("Nature", [.leaves, .fireflies]),
+      (
+        "Weather",
+        [
+          WeatherEffect.snow, .rain, .drizzle, .storm, .lightning, .sleet, .hail, .mist, .clouds,
+          .sunlight,
+        ]
+      ),
+      ("Seasonal Drift", WeatherEffect.seasonal), ("Wildlife", WeatherEffect.wildlife),
     ] {
       if !modes.items.isEmpty { modes.addItem(.separator()) }
       modes.addItem(.sectionHeader(title: title))
@@ -193,9 +206,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         effectItems[effect] = option
       }
     }
-    modes.addItem(.separator())
-    halloweenItem = add("Halloween Snow", #selector(toggleHalloween), to: modes)
-    halloweenItem.image = NSImage(systemSymbolName: "moon.stars", accessibilityDescription: nil)
     sceneItem = menu.addItem(withTitle: "Scene", action: nil, keyEquivalent: "")
     sceneItem.submenu = modes
     let details = NSMenu()
@@ -230,6 +240,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let sliderItem = NSMenuItem()
     sliderItem.view = snowfallSlider
     menu.addItem(sliderItem)
+    windHeader = .sectionHeader(title:"Wind Speed")
+    menu.addItem(windHeader)
+    windSlider.changed = { [unowned self] speed in
+      guard !Preferences.liveWeather else {return}
+      Preferences.manualWindSpeed=speed
+      screens.forEach {$0.setWind(effectiveWind,automatic:Preferences.liveWeather)}
+    }
+    let windItem=NSMenuItem();windItem.view=windSlider;menu.addItem(windItem)
     menu.addItem(.separator())
     let surfaces = NSMenu()
     surfaces.autoenablesItems = false
@@ -307,22 +325,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     return item
   }
 
-  func menuNeedsUpdate(_ menu: NSMenu) {
+  private func updateWeatherControls() {
     snowfallSlider.automatic = Preferences.liveWeather
     snowfallSlider.awaitingWeather = Preferences.liveWeather && weather.current == nil
     snowfallSlider.snowfall = effectiveIntensity
     intensityHeader.title = Preferences.liveWeather ? "Intensity · Automatic" : "Intensity"
+    windSlider.automatic=Preferences.liveWeather
+    windSlider.awaitingWeather=Preferences.liveWeather && weather.current == nil
+    windSlider.speed=Preferences.liveWeather ? weather.current?.windSpeed ?? 0 : Preferences.manualWindSpeed
+    windHeader.title=Preferences.liveWeather ? "Wind Speed · Automatic":"Wind Speed"
+  }
+
+  func menuWillOpen(_ menu: NSMenu) {
+    updateWeatherControls()
+  }
+
+  func menuNeedsUpdate(_ menu: NSMenu) {
+    updateWeatherControls()
     accumulateItem.state = accumulates ? .on : .off
     let effect = self.effect
-    let autumn = effect == .leaves
+    let autumn = scene.stacked != nil
+    let accumulating = effect.canAccumulate || autumn
     let water = effect.hasWater
     liveItem.state = Preferences.liveWeather ? .on : .off
     liveItem.title = Preferences.liveWeather ? "Live Weather: On" : "Live Weather: Off"
     for (mode, item) in effectItems {
-      item.state = !Preferences.liveWeather && mode == effect ? .on : .off
+      item.state =
+        !Preferences.liveWeather
+          && (mode == effect || mode == scene.stacked || mode == scene.wildlife) ? .on : .off
     }
     sceneItem.title =
-      Preferences.liveWeather ? "Choose a Manual Scene…" : "Manual Scene · \(effect.title)"
+      Preferences.liveWeather ? "Choose a Manual Scene…" : "Manual Scene · \(scene.summary)"
     weatherDetailsItem.title = Preferences.liveWeather ? "Local Weather · Live" : "Local Weather"
     weatherCard.update(weather: weather)
     weatherRefreshItem.isEnabled = Preferences.liveWeather
@@ -338,25 +371,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     meltItem.title =
       effect.hasBanks
       ? (effect == .clouds ? "Dissipate Clouds" : "Dissipate Mist")
-      : water ? "Evaporate Puddles" : autumn ? "Wither Leaves" : "Melt Snow"
+      : water ? "Evaporate Puddles" : autumn ? "Fade Seasonal Drift" : "Melt Snow"
     snowOnWindowsItem.title =
       effect.hasBanks
       ? (effect == .clouds ? "Clouds on Windows" : "Mist on Windows")
       : water
         ? "Rain on Windows"
-        : autumn ? "Leaves on Windows" : effect == .hail ? "Hail on Windows" : "Snow on Windows"
+        : autumn ? "Drift on Windows" : effect == .hail ? "Hail on Windows" : "Snow on Windows"
     clearItem.title = "Clear Scene"
-    surfaceItem.isHidden = !effect.canAccumulate && effect != .hail
+    surfaceItem.isHidden = !accumulating && effect != .hail
     screenReflectionsToggle.state = Preferences.screenReflections ? .on : .off
     refreshPermissions()
     accumulateItem.title =
       effect.hasBanks
       ? (effect == .clouds ? "Form Cloud Banks" : "Form Mist Banks")
       : water ? "Form Puddles" : "Accumulate"
-    accumulateItem.isEnabled = effect.canAccumulate
-    accumulateItem.isHidden = !effect.canAccumulate
-    meltItem.isHidden = !effect.canAccumulate
-    snowOnWindowsItem.isHidden = !effect.canAccumulate && effect != .hail
+    accumulateItem.isEnabled = accumulating
+    accumulateItem.isHidden = !accumulating
+    meltItem.isHidden = !accumulating
+    snowOnWindowsItem.isHidden = !accumulating && effect != .hail
     reflectionsItem.isHidden = false
     reflectionStatusItem.isHidden = false
     reflectionPermissionItem.isHidden = CGPreflightScreenCaptureAccess()
@@ -364,12 +397,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       screens.first(where: { $0.isCapturingReflections })?.reflectionStatus ?? screens.first?
       .reflectionStatus ?? "Wallpaper reflections"
     meltItem.state = thaws ? .on : .off
-    meltItem.isEnabled = accumulates && effect.canAccumulate
+    meltItem.isEnabled = accumulates && accumulating
     snowOnWindowsItem.state = snowOnWindows ? .on : .off
-    snowOnWindowsItem.isEnabled = effect.canAccumulate || effect == .hail
+    snowOnWindowsItem.isEnabled = accumulating || effect == .hail
     clearItem.isEnabled = screens.contains(where: { $0.hasContent })
-    halloweenItem.state = Halloween.isWanted && effect == .snow ? .on : .off
-    halloweenItem.isEnabled = true
     reflectionsItem.state = Preferences.screenReflections ? .off : .on
     reflectionsItem.isEnabled = true
     snapshotReflectionsItem.state =
@@ -450,7 +481,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   @objc private func chooseMode(_ sender: NSMenuItem) {
     guard let raw = sender.representedObject as? String, let effect = WeatherEffect(rawValue: raw)
     else { return }
-    Preferences.effect = effect
+    var selection = Preferences.manualScene
+    selection.toggleManual(effect)
+    Preferences.manualScene = selection
     Preferences.liveWeather = false
     weather.setEnabled(false)
     applyWeather()
@@ -463,22 +496,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func applyWeather() {
+    // A custom menu view can survive multiple tracking sessions. Restore its
+    // controls immediately, even when AppKit does not request a menu update.
+    if statusItem != nil { updateWeatherControls() }
+    let scene = self.scene
     for snow in screens {
       snow.setScene(scene)
       snow.setIntensity(effectiveIntensity)
-      snow.setWind(weather.current?.horizontalWind ?? 0)
+      snow.setWind(effectiveWind,automatic:Preferences.liveWeather)
     }
     updateStatusIcon()
-    refreshHalloween()
     prepareReflectionsIfNeeded()
     statusItem?.button?.image =
-      halloween
-      ? Halloween.icon
-      : NSImage(
-        systemSymbolName: effect.symbol, accessibilityDescription: "Atmos — \(effect.title)")
+      NSImage(
+        systemSymbolName: statusEffect.symbol, accessibilityDescription: "Atmos — \(scene.summary)")
     statusItem?.button?.toolTip =
       Preferences.liveWeather
-      ? "Atmos · Live Weather On · \(weather.status)" : "Atmos · Manual · \(effect.title)"
+      ? "Atmos · Live Weather On · \(weather.status)" : "Atmos · Manual · \(scene.summary)"
   }
 
   @objc private func chooseWeatherSource(_ sender: NSMenuItem) {
@@ -487,7 +521,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     weather.setSource(source)
   }
 
-  @objc private func refreshWeather() { weather.refresh() }
+  @objc private func refreshWeather() { weather.refresh(force: true) }
 
   @objc private func openLocationSettings() {
     if let url = URL(
@@ -610,36 +644,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     screens.forEach { $0.setReflections(true) }
   }
 
-  @objc private func toggleHalloween() {
-    if effect != .snow {
-      Preferences.effect = .snow
-      Preferences.liveWeather = false
-      weather.setEnabled(false)
-      if !Halloween.isWanted { Halloween.toggle() }
-      applyWeather()
-    } else {
-      Halloween.toggle()
-      refreshHalloween()
-    }
-  }
-
   private func updateStatusIcon() {
     statusItem.button?.appearsDisabled = effectiveIntensity == .off
-  }
-
-  private static func icon(halloween: Bool) -> NSImage? {
-    halloween
-      ? Halloween.icon
-      : NSImage(systemSymbolName: Preferences.effect.symbol, accessibilityDescription: "Atmos")
-  }
-
-  private func refreshHalloween() {
-    guard (Halloween.isWanted && effect == .snow) != halloween else { return }
-    halloween.toggle()
-    statusItem.button?.image =
-      halloween
-      ? Halloween.icon : NSImage(systemSymbolName: effect.symbol, accessibilityDescription: "Atmos")
-    for snow in screens { snow.halloween = halloween }
   }
 
   // MARK: - System
@@ -659,6 +665,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     observe(distributed, Notification.Name("com.apple.screenIsUnlocked")) {
       $0.screenLocked = false
     }
+    observers.append(
+      NotificationCenter.default.addObserver(
+        forName: WindowChanges.notification, object: nil, queue: .main
+      ) { [weak self] _ in
+        self?.screens.forEach { $0.windowGeometryChanged() }
+      })
     observe(.default, NSWindow.didChangeOcclusionStateNotification) { _ in }
     observe(.default, NSApplication.didChangeScreenParametersNotification) { $0.syncScreens() }
     observe(workspace, NSWorkspace.activeSpaceDidChangeNotification) {
@@ -692,18 +704,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     weather.setSuspended(!awake || !visible)
     if awake && visible && statusItem != nil {
       prepareReflectionsIfNeeded()
-      if halloweenTimer == nil {
-        refreshHalloween()
-        let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
-          self?.refreshHalloween()
+      if liveSceneTimer == nil {
+        let timer = Timer(timeInterval: 12, repeats: true) { [weak self] _ in
+          guard let self else { return }
+          if weather.current != nil { applyWeather() }
         }
-        timer.tolerance = 10
+        timer.tolerance = 1
         RunLoop.main.add(timer, forMode: .common)
-        halloweenTimer = timer
+        liveSceneTimer = timer
       }
     } else {
-      halloweenTimer?.invalidate()
-      halloweenTimer = nil
+      liveSceneTimer?.invalidate()
+      liveSceneTimer = nil
     }
     for snow in screens {
       snow.occlusionChanged()
@@ -716,7 +728,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   func applicationWillTerminate(_ notification: Notification) {
     weather.stop()
-    halloweenTimer?.invalidate()
+    liveSceneTimer?.invalidate()
     screens.forEach { $0.close() }
   }
 }

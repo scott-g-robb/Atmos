@@ -9,7 +9,7 @@ final class MetalRenderingTests: XCTestCase {
   func testAllWeatherPipelinesRenderVisiblePixels() throws {
     let device = try metalDevice()
     let queue = try XCTUnwrap(device.makeCommandQueue())
-    for effect in WeatherEffect.allCases where !effect.usesSnowSimulation {
+    for effect in WeatherEffect.allCases where !effect.usesSnowSimulation && effect != .none {
       let renderer = try WeatherRenderer(device: device, format: .rgba8Unorm, size: SIMD2(960, 600))
       renderer.setEffect(effect)
       let surface = WindowSurface(
@@ -37,7 +37,7 @@ final class MetalRenderingTests: XCTestCase {
           if difference >= 8 { contrasted += 1 }
         }
         XCTAssertGreaterThan(
-          contrasted, effect == .fireflies ? 100 : 200,
+          contrasted, effect == .fireflies || effect == .birds ? 100 : 200,
           "\(effect.title) must remain visible on a \(name) wallpaper")
         if let output = ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {
           try export(
@@ -90,7 +90,8 @@ final class MetalRenderingTests: XCTestCase {
   func testOptimizedWeatherMatchesOriginalImages() throws {
     let device = try metalDevice()
     let queue = try XCTUnwrap(device.makeCommandQueue())
-    for effect in WeatherEffect.allCases where !effect.usesSnowSimulation {
+    for effect in WeatherEffect.allCases
+    where [.hail, .mist, .clouds, .sunlight, .fireflies].contains(effect) {
       let optimized = try WeatherRenderer(
         device: device, format: .rgba8Unorm, size: SIMD2(960, 600), seed: 8173)
       let reference = try WeatherRenderer(
@@ -193,6 +194,53 @@ final class MetalRenderingTests: XCTestCase {
     XCTAssertGreaterThan(pixels[i + 3], 10)
     XCTAssertGreaterThan(
       Int(pixels[i]), Int(pixels[i + 2]) + 15, "A red captured scene must produce a red reflection")
+  }
+
+  func testDetachedDropletsUseTheSameDesktopReflectionSource() throws {
+    let device = try metalDevice()
+    let queue = try XCTUnwrap(device.makeCommandQueue())
+    let renderer = try WeatherRenderer(device: device, format: .rgba8Unorm, size: SIMD2(320, 300))
+    let sim = renderer.simulation
+    sim.intensity = .off
+    sim.evaporates = false
+    sim.updateWindows([
+      WindowSurface(id: 41, frame: CGRect(x: 50, y: 100, width: 220, height: 100),
+        blockers: [], cornerRadius: 18, cornerExponent: 2.5, isDock: false)
+    ])
+    for x in stride(from: Float(50), through: 270, by: 4) {
+      sim.water[1].hit(x: x, amount: 3, impulse: 0)
+    }
+    for _ in 0..<120 { sim.step(dt: 1 / 120, cursor: SIMD2(-1000, -1000)) }
+    sim.updateWindows([])
+    XCTAssertTrue(sim.particles.contains { $0.motion.w == 9 })
+    let scene = try texture(device, width: 2, height: 2)
+    renderer.reflection = scene
+    let target = try texture(device, width: 320, height: 300)
+    var results: [[UInt8]] = []
+    for color: [UInt8] in [[255, 0, 0, 255], [0, 0, 255, 255]] {
+      let pixels = Array(repeating: color, count: 4).flatMap { $0 }
+      pixels.withUnsafeBytes {
+        scene.replace(region: MTLRegionMake2D(0, 0, 2, 2), mipmapLevel: 0,
+          withBytes: $0.baseAddress!, bytesPerRow: 8)
+      }
+      try render(renderer, target: target, queue: queue)
+      if let output=ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {
+        try export(bytes(target),width:320,height:300,path:"\(output)/liquid-contour-\(color[0]).png")
+      }
+      let snapshot=bytes(target)
+      try render(renderer,target:target,queue:queue)
+      XCTAssertEqual(bytes(target),snapshot,"Unchanged water must render identically across buffer slots")
+      results.append(snapshot)
+    }
+    var red = 0, blue = 0, visible = 0
+    for i in stride(from: 0, to: results[0].count, by: 4) where results[0][i + 3] > 30 {
+      red += Int(results[0][i]) - Int(results[0][i + 2])
+      blue += Int(results[1][i + 2]) - Int(results[1][i])
+      visible += 1
+    }
+    XCTAssertGreaterThan(visible, 100)
+    XCTAssertGreaterThan(red, visible * 30)
+    XCTAssertGreaterThan(blue, visible * 30)
   }
 
   func testDesktopReflectionKeepsHorizontalRegistration() throws {
@@ -497,12 +545,280 @@ final class MetalRenderingTests: XCTestCase {
     XCTAssertGreaterThan(pixels[i + 3], 50)
   }
 
+  func testSixBotanicalStylesRenderWithLeafMotionBlurOnLightAndDark() throws {
+    let device = try metalDevice()
+    let queue = try XCTUnwrap(device.makeCommandQueue())
+    let library = try device.makeLibrary(source: shaderSource, options: nil)
+    let descriptor = MTLRenderPipelineDescriptor()
+    descriptor.vertexFunction = library.makeFunction(name: "spriteVertex")
+    descriptor.fragmentFunction = library.makeFunction(name: "spriteFragment")
+    let attachment = descriptor.colorAttachments[0]!
+    attachment.pixelFormat = .rgba8Unorm
+    attachment.isBlendingEnabled = true
+    attachment.sourceRGBBlendFactor = .one
+    attachment.sourceAlphaBlendFactor = .one
+    attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+    attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+    let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+    for effect in WeatherEffect.seasonal {
+      for level in [0.025, 0.96] {
+        let target = try texture(device, width: 960, height: 600)
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(level, level, level, 1)
+        let command = try XCTUnwrap(queue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(descriptor: pass))
+        var sprites: [Sprite] = []
+        for i in 0..<12 {
+          let position = SIMD2<Float>(100 + Float(i % 4) * 250, 110 + Float(i / 4) * 185)
+          let seed: Float = 0.031 + Float(i) * 0.081
+          let sprite = Sprite(
+            position: position,
+            velocity: SIMD2(Float(i % 3) * 100, -60), size: 100, alpha: 1, soft: 0,
+            leaf: seed + (effect == .dandelionSeeds && i < 6 ? 2 : 0),
+            turn: Float(i) * 0.7, flip: i % 2 == 0 ? 0.8 : -0.7,
+            turnSpeed: effect == .mapleSeeds ? 45 : 1.2, flipSpeed: 0.7)
+          sprites.append(sprite)
+        }
+        var uniforms = Uniforms(viewSize: SIMD2(960, 600), scale: 1, time: 0, columnWidth: 2)
+        uniforms.autumn = effect.botanicalStyle
+        let buffer = try XCTUnwrap(
+          device.makeBuffer(bytes: &sprites, length: sprites.count * MemoryLayout<Sprite>.stride))
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setVertexBuffer(buffer, offset: 0, index: 0)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
+        encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: sprites.count)
+        encoder.endEncoding()
+        try synchronizeIfNeeded([target], into: command)
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+        let pixels = bytes(target)
+        let background = Int((level * 255).rounded())
+        var visible = 0
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+          if max(
+            abs(Int(pixels[i]) - background), abs(Int(pixels[i + 1]) - background),
+            abs(Int(pixels[i + 2]) - background)) > 10
+          {
+            visible += 1
+          }
+        }
+        XCTAssertGreaterThan(visible, 500, effect.title)
+        XCTAssertLessThan(
+          visible, 60000,
+          "Artwork must have a transparent silhouette, including thin seed filaments")
+        if let output = ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {
+          try export(
+            pixels, width: 960, height: 600,
+            path: "\(output)/botanical-\(effect.rawValue)-\(level < 0.5 ? "dark" : "light").png")
+        }
+      }
+    }
+  }
+
+  func testThreeLayersKeepIndependentParticlesAndRetireWithoutRestartingWeather() throws {
+    let device = try metalDevice()
+    let simulation = SnowSimulation(width: 960, height: 600, snowfall: .steady)
+    let renderer = try Renderer(device: device, pixelFormat: .bgra8Unorm, simulation: simulation)
+    renderer.setScene(
+      WeatherScene(primary: .rain, stacked: .cherryBlossoms, wildlife: .birds), calm: false)
+    renderer.setIntensity(.steady)
+    let rain = renderer.current
+    let petals = try XCTUnwrap(renderer.overlays.first { $0.effect == .cherryBlossoms })
+    let birds = try XCTUnwrap(renderer.overlays.first { $0.effect == .birds })
+    for _ in 0..<1200 {
+      rain.weather.simulation.step(dt: 1 / 120, cursor: SIMD2(-1000, -1000))
+      _ = petals.snow.simulation.step(dt: 1 / 120, cursor: SIMD2(-1000, -1000))
+      birds.weather.simulation.step(dt: 1 / 120, cursor: SIMD2(-1000, -1000))
+    }
+    XCTAssertGreaterThan(rain.weather.simulation.particleCount, 0)
+    XCTAssertGreaterThan(petals.snow.simulation.spriteCount, 0)
+    XCTAssertTrue(birds.weather.simulation.hasContent)
+    renderer.setScene(
+      WeatherScene(primary: .rain, stacked: .mapleSeeds, wildlife: .birds), calm: false)
+    XCTAssertTrue(renderer.current === rain)
+    XCTAssertTrue(renderer.overlays.contains { $0 === birds })
+    XCTAssertTrue(renderer.retiring.contains { $0 === petals })
+    renderer.setScene(WeatherScene(primary: .none, wildlife: .birds), calm: false)
+    XCTAssertTrue(renderer.overlays.contains { $0 === birds })
+    XCTAssertTrue(renderer.retiring.contains { $0 === rain })
+  }
+
+  func testSnowOnlyLiveSceneStillAdvancesItsWeatherClockAndSmoothsMeasurements() throws {
+    let device = try metalDevice()
+    let renderer = try Renderer(
+      device: device, pixelFormat: .rgba8Unorm,
+      simulation: SnowSimulation(width: 640, height: 400, snowfall: .steady))
+    var reading = WeatherSnapshot(
+      time: Date().timeIntervalSince1970, weatherCode: 73,
+      temperature: -1, windSpeed: 10, windDirection: 270, precipitation: 0.1, isDay: 0)
+    reading.precipitationUnit = "mm/h"
+    reading.cloudCover = 0
+    renderer.setScene(WeatherScene(weather: reading), calm: false)
+    for frame in 0..<120 {
+      renderer.step(dt: 1 / 120, cursor: SIMD2(-1000, -1000), now: Double(frame) / 120)
+    }
+    XCTAssertGreaterThan(renderer.weather.elapsed, 0.9)
+    let initial = try XCTUnwrap(renderer.weather.dynamics).precipitationStrength
+    reading = WeatherSnapshot(
+      time: reading.time, weatherCode: 73, temperature: -1,
+      windSpeed: 10, windDirection: 270, precipitation: 1, isDay: 0)
+    reading.precipitationUnit = "mm/h"
+    reading.cloudCover = 0
+    renderer.setScene(WeatherScene(weather: reading), calm: false)
+    renderer.step(dt: 1 / 120, cursor: SIMD2(-1000, -1000), now: 1)
+    let current = try XCTUnwrap(renderer.weather.dynamics).precipitationStrength
+    XCTAssertGreaterThan(current, initial)
+    XCTAssertLessThan(current, WeatherDynamics(weather: reading).precipitationStrength)
+  }
+
+  func testFloatingLeavesUseTheWaterGroundPassWithoutDrawingOverTheDock() throws {
+    let device = try metalDevice()
+    let queue = try XCTUnwrap(device.makeCommandQueue())
+    let simulation = SnowSimulation(width: 640, height: 400, snowfall: .off)
+    simulation.autumn = true
+    let pool = WaterSurface(id: 0, origin: .zero, width: 640)
+    for x in stride(from: Float(0), through: 640, by: 4) { pool.hit(x: x, amount: 12, impulse: 0) }
+    pool.step(dt: 1 / 120, evaporates: false, clearing: false)
+    XCTAssertTrue(
+      simulation.surfaceDrift.catchMaterial(
+        x: 320, from: 40, to: 0,
+        velocity: SIMD2(0, -40), size: 24, seed: 0.35, area: 1, turn: 0, water: [pool]))
+    _ = simulation.surfaceDrift.step(
+      dt: 1 / 120, water: [pool], wind: 0, cursor: nil,
+      cursorVelocity: .zero, retiring: false, clearing: false)
+    let renderer = try SnowSceneRenderer(
+      device: device, queue: queue, format: .rgba8Unorm, simulation: simulation)
+    let main = try texture(device, width: 640, height: 400)
+    let ground = try texture(device, width: 640, height: 128)
+    let command = try XCTUnwrap(queue.makeCommandBuffer())
+    func pass(_ target: MTLTexture) -> MTLRenderPassDescriptor {
+      let pass = MTLRenderPassDescriptor()
+      pass.colorAttachments[0].texture = target
+      pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+      pass.colorAttachments[0].loadAction = .clear
+      pass.colorAttachments[0].storeAction = .store
+      return pass
+    }
+    let foreground = try XCTUnwrap(command.makeRenderCommandEncoder(descriptor: pass(main)))
+    renderer.encode(
+      with: foreground, ambient: (SIMD3(repeating: 1), .zero, .zero), scale: 1, time: 0,
+      includeGround: false)
+    foreground.endEncoding()
+    let behindDock = try XCTUnwrap(command.makeRenderCommandEncoder(descriptor: pass(ground)))
+    renderer.encodeGround(with: behindDock, height: 128, scale: 1)
+    behindDock.endEncoding()
+    try synchronizeIfNeeded([main, ground], into: command)
+    command.commit()
+    command.waitUntilCompleted()
+    XCTAssertNil(command.error)
+    let mainPixels = bytes(main)
+    let groundPixels = bytes(ground)
+    XCTAssertTrue(stride(from: 3, to: mainPixels.count, by: 4).allSatisfy { mainPixels[$0] == 0 })
+    XCTAssertGreaterThan(
+      stride(from: 3, to: groundPixels.count, by: 4).filter { groundPixels[$0] > 10 }.count, 20)
+  }
+
+  func testButterfliesAlwaysRenderBehindApplicationWindows() throws {
+    let device = try metalDevice()
+    let queue = try XCTUnwrap(device.makeCommandQueue())
+    let renderer = try WeatherRenderer(
+      device: device, format: .rgba8Unorm, size: SIMD2(960, 600), seed: 42)
+    renderer.setEffect(.butterflies)
+    for _ in 0..<240 { renderer.simulation.step(dt: 1 / 120, cursor: SIMD2(-1000, -1000)) }
+    let target = try texture(device, width: 960, height: 600)
+    try render(renderer, target: target, queue: queue)
+    let uncovered = bytes(target)
+    XCTAssertGreaterThan(
+      stride(from: 3, to: uncovered.count, by: 4).reduce(0) { $0 + Int(uncovered[$1]) }, 0)
+    renderer.windowOccluders = [SIMD4(-50, -50, 1010, 650)]
+    try render(renderer, target: target, queue: queue)
+    let covered = bytes(target)
+    XCTAssertTrue(stride(from: 3, to: covered.count, by: 4).allSatisfy { covered[$0] == 0 })
+  }
+
+  func testBirdVariantsRenderCurvedWingsAndDistinctPlumage() throws {
+    let device = try metalDevice()
+    let queue = try XCTUnwrap(device.makeCommandQueue())
+    let library = try device.makeLibrary(source: weatherShaderSource, options: nil)
+    let descriptor = MTLRenderPipelineDescriptor()
+    descriptor.vertexFunction = library.makeFunction(name: "weatherVertex")
+    descriptor.fragmentFunction = library.makeFunction(name: "weatherFragment")
+    let attachment = descriptor.colorAttachments[0]!
+    attachment.pixelFormat = .rgba8Unorm
+    attachment.isBlendingEnabled = true
+    attachment.sourceRGBBlendFactor = .one
+    attachment.sourceAlphaBlendFactor = .one
+    attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+    attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+    let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+    var models: [WeatherParticle] = []
+    for species in 0..<4 {
+      for pose in 0..<3 {
+        models.append(
+          WeatherParticle(
+            rect: SIMD4(125 + Float(species) * 235, 120 + Float(pose) * 180, 180, 170),
+            motion: SIMD4(80, 0, 0.12 + Float(pose) * 0.21, 14), color: SIMD4(0.3, 0.3, 0.3, 1),
+            life: SIMD4(2, 10000, Float(species + 1), pose == 2 ? 1 : 0)))
+      }
+    }
+    let buffer = try XCTUnwrap(
+      device.makeBuffer(bytes: &models, length: models.count * MemoryLayout<WeatherParticle>.stride)
+    )
+    for level in [0.025, 0.96] {
+      let target = try texture(device, width: 960, height: 600)
+      let pass = MTLRenderPassDescriptor()
+      pass.colorAttachments[0].texture = target
+      pass.colorAttachments[0].loadAction = .clear
+      pass.colorAttachments[0].storeAction = .store
+      pass.colorAttachments[0].clearColor = MTLClearColorMake(level, level, level, 1)
+      let command = try XCTUnwrap(queue.makeCommandBuffer())
+      let encoder = try XCTUnwrap(command.makeRenderCommandEncoder(descriptor: pass))
+      var u = WeatherUniforms(
+        viewSize: SIMD2(960, 600), time: 1.1, opacity: 1, light: SIMD4(repeating: 1))
+      u.screen = SIMD4(960, 600, 600, 0)
+      var dummy = SIMD4<Float>.zero
+      encoder.setRenderPipelineState(pipeline)
+      encoder.setVertexBuffer(buffer, offset: 0, index: 0)
+      encoder.setVertexBytes(&u, length: MemoryLayout<WeatherUniforms>.stride, index: 1)
+      encoder.setFragmentBytes(&u, length: MemoryLayout<WeatherUniforms>.stride, index: 1)
+      for index in [3, 4, 5] { encoder.setFragmentBytes(&dummy, length: 16, index: index) }
+      encoder.drawPrimitives(
+        type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: models.count)
+      encoder.endEncoding()
+      try synchronizeIfNeeded([target], into: command)
+      command.commit()
+      command.waitUntilCompleted()
+      XCTAssertNil(command.error)
+      let pixels = bytes(target)
+      var tiles: [Data] = []
+      for column in 0..<4 {
+        var tile: [UInt8] = []
+        for row in 35..<205 {
+          let start = (row * 960 + 35 + column * 235) * 4
+          tile.append(contentsOf: pixels[start..<(start + 180 * 4)])
+        }
+        tiles.append(Data(tile))
+      }
+      XCTAssertEqual(Set(tiles).count, 4, "Each bird variant must have distinct visible artwork")
+      if let output = ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {
+        try export(
+          pixels, width: 960, height: 600,
+          path: "\(output)/bird-variants-\(level < 0.5 ? "dark" : "light").png")
+      }
+    }
+  }
+
   func testOriginalSnowAndLeafMetalPipelinesStillCompile() throws {
     let device = try metalDevice()
     let simulation = SnowSimulation(width: 640, height: 400, snowfall: .steady)
     _ = try Renderer(device: device, pixelFormat: .bgra8Unorm, simulation: simulation)
     XCTAssertEqual(MemoryLayout<WeatherParticle>.stride, 64)
-    XCTAssertEqual(MemoryLayout<WeatherUniforms>.stride, 160)
+    XCTAssertEqual(MemoryLayout<WeatherUniforms>.stride, 176)
     XCTAssertEqual(MemoryLayout<WaterRipple>.stride, 16)
   }
 
@@ -514,7 +830,7 @@ final class MetalRenderingTests: XCTestCase {
     let queue = try XCTUnwrap(device.makeCommandQueue())
     let target = try texture(device, width: 1920, height: 1080)
     var report: [[String: Any]] = []
-    for effect in WeatherEffect.allCases where !effect.usesSnowSimulation {
+    for effect in WeatherEffect.allCases where !effect.usesSnowSimulation && effect != .none {
       let renderer = try WeatherRenderer(
         device: device, format: .rgba8Unorm, size: SIMD2(1920, 1080))
       renderer.setEffect(effect)
@@ -539,6 +855,84 @@ final class MetalRenderingTests: XCTestCase {
       .write(to: url)
   }
 
+  func testProfileThreeLiveLayersWhenRequested() throws {
+    guard let output = ProcessInfo.processInfo.environment["ATMOS_BENCHMARK_DIR"] else {
+      throw XCTSkip("Set ATMOS_BENCHMARK_DIR for isolated live-layer profiling")
+    }
+    let device = try metalDevice()
+    let queue = try XCTUnwrap(device.makeCommandQueue())
+    let target = try texture(device, width: 1920, height: 1080)
+    var report = [[String: Any]]()
+    for (index, material) in WeatherEffect.seasonal.enumerated() {
+      let renderer = try Renderer(
+        device: device, pixelFormat: .rgba8Unorm,
+        simulation: SnowSimulation(width: 1920, height: 1080, snowfall: .steady))
+      var reading = WeatherSnapshot(
+        time: Date().timeIntervalSince1970, weatherCode: 51,
+        temperature: 18, windSpeed: 25, windDirection: 270, precipitation: 0.2, isDay: 1)
+      reading.precipitationUnit = "mm/h"
+      reading.cloudCover = 99
+      reading.humidity = 85
+      reading.windGust = 38
+      var scene = WeatherScene(weather: reading)
+      scene.stacked = material
+      scene.wildlife = index % 2 == 0 ? .birds : .butterflies
+      renderer.setScene(scene, calm: false)
+      renderer.setIntensity(.steady)
+      let frames: [SIMD4<Float>] = [SIMD4(200, 200, 800, 700), SIMD4(1000, 100, 1700, 600)]
+      renderer.setCoverFrames(frames)
+      let surfaces = frames.enumerated().map { i, b in
+        WindowSurface(
+          id: UInt32(i + 10),
+          frame: CGRect(
+            x: CGFloat(b.x), y: CGFloat(b.y), width: CGFloat(b.z - b.x), height: CGFloat(b.w - b.y)),
+          blockers: [], cornerRadius: 18, cornerExponent: 2.5, isDock: false)
+      }
+      renderer.updateWindows(
+        WindowUpdate(
+          surfaces: surfaces, interval: 0.1, parked: [], elsewhere: [], sliding: false,
+          slideVelocity: 0), onWindows: true)
+      for frame in 0..<1800 {
+        renderer.step(dt: 1 / 120, cursor: SIMD2(-1000, -1000), now: Double(frame) / 120)
+      }
+      let start = CACurrentMediaTime()
+      for frame in 1800..<2400 {
+        renderer.step(dt: 1 / 120, cursor: SIMD2(-1000, -1000), now: Double(frame) / 120)
+      }
+      let simulationMS = (CACurrentMediaTime() - start) / 600 * 1000
+      var gpuMS = 0.0
+      var renderCPU = 0.0
+      for frame in 0..<120 {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = target
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        let command = try XCTUnwrap(queue.makeCommandBuffer())
+        let start = CACurrentMediaTime()
+        renderer.encode(into: command, pass: pass, scale: 1, time: Float(frame) / 120)
+        command.commit()
+        renderCPU += (CACurrentMediaTime() - start) * 1000
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+        gpuMS += max(0, command.gpuEndTime - command.gpuStartTime) * 1000
+      }
+      report.append([
+        "material": material.rawValue, "wildlife": scene.wildlife!.rawValue,
+        "simulation_including_airflow_ms": simulationMS, "render_encode_cpu_ms": renderCPU / 120,
+        "render_gpu_ms": gpuMS / 120, "device": device.name,
+        "capture":
+          "excluded; capture remains adaptive and is measured separately by runtime metrics",
+      ])
+      if let output = ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {
+        try export(
+          bytes(target), width: 1920, height: 1080, path: "\(output)/live-\(material.rawValue).png")
+      }
+    }
+    try FileManager.default.createDirectory(atPath: output, withIntermediateDirectories: true)
+    try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+      .write(to: URL(fileURLWithPath: output).appendingPathComponent("dynamic-performance.json"))
+  }
+
   func testCompareOriginalAndOptimizedShaderCostsWhenRequested() throws {
     guard let output = ProcessInfo.processInfo.environment["ATMOS_BENCHMARK_DIR"] else {
       throw XCTSkip("Opt-in GPU comparison")
@@ -547,7 +941,7 @@ final class MetalRenderingTests: XCTestCase {
     let queue = try XCTUnwrap(device.makeCommandQueue())
     let target = try texture(device, width: 1512, height: 982)
     var report = [[String: Any]]()
-    for effect in WeatherEffect.allCases where !effect.usesSnowSimulation {
+    for effect in WeatherEffect.allCases where !effect.usesSnowSimulation && effect != .none {
       var costs = [String: Double]()
       for (name, source) in [
         ("original", referenceWeatherShaderSource), ("optimized", weatherShaderSource),
@@ -568,6 +962,194 @@ final class MetalRenderingTests: XCTestCase {
     try FileManager.default.createDirectory(atPath: output, withIntermediateDirectories: true)
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
       .write(to: URL(fileURLWithPath: output).appendingPathComponent("shader-comparison.json"))
+  }
+
+  private func synchronizeIfNeeded(_ textures: [MTLTexture], into command: MTLCommandBuffer) throws
+  {
+    let managed = textures.filter { $0.storageMode == .managed }
+    guard !managed.isEmpty else { return }
+    let blit = try XCTUnwrap(command.makeBlitCommandEncoder())
+    for texture in managed { blit.synchronize(resource: texture) }
+    blit.endEncoding()
+  }
+
+  func testMapleMaterialRendersAboveItsSharedWaterline() throws {
+    let device=try metalDevice(),queue=try XCTUnwrap(device.makeCommandQueue())
+    let renderer=try Renderer(device:device,pixelFormat:.rgba8Unorm,
+      simulation:SnowSimulation(width:800,height:300,snowfall:.steady))
+    renderer.setScene(WeatherScene(primary:.rain,stacked:.mapleSeeds),calm:false)
+    renderer.setIntensity(.steady);renderer.weather.intensity = .off;renderer.weather.evaporates=false
+    for x in stride(from:Float(0),through:800,by:4) {renderer.weather.water[0].hit(x:x,amount:14,impulse:0)}
+    for frame in 0..<1800 {renderer.step(dt:1/60,cursor:SIMD2(-1000,-1000),now:Double(frame)/60)}
+    let maple=try XCTUnwrap(renderer.overlays.first {$0.effect == .mapleSeeds})
+    XCTAssertGreaterThan(maple.snow.simulation.surfaceDrift.count,0)
+    let target=try texture(device,width:800,height:300)
+    let pass=MTLRenderPassDescriptor();pass.colorAttachments[0].texture=target
+    pass.colorAttachments[0].loadAction = .clear;pass.colorAttachments[0].storeAction = .store
+    pass.colorAttachments[0].clearColor=MTLClearColorMake(0.04,0.05,0.055,1)
+    let command=try XCTUnwrap(queue.makeCommandBuffer())
+    renderer.encode(into:command,pass:pass,scale:1,time:30)
+    try synchronizeIfNeeded([target],into:command);command.commit();command.waitUntilCompleted();XCTAssertNil(command.error)
+    if let output=ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {
+      try export(bytes(target),width:800,height:300,path:"\(output)/maples-floating.png")
+    }
+  }
+
+  func testProfileDenseLiquidAndComparePreviousSurfaceWhenRequested() throws {
+    guard let output=ProcessInfo.processInfo.environment["ATMOS_BENCHMARK_DIR"] else {throw XCTSkip("Set ATMOS_BENCHMARK_DIR for dense liquid profiling")}
+    let device=try metalDevice(),queue=try XCTUnwrap(device.makeCommandQueue())
+    let target=try texture(device,width:1920,height:1080)
+    var report=[[String:Any]]()
+    var sources=[("current",weatherShaderSource)]
+    if let path=ProcessInfo.processInfo.environment["ATMOS_REFERENCE_SHADER"] {sources.append(("build49",try String(contentsOfFile:path)))}
+    for (name,source) in sources {
+      let renderer=try WeatherRenderer(device:device,format:.rgba8Unorm,size:SIMD2(1920,1080),shaderSource:source,seed:42)
+      let sim=renderer.simulation;sim.intensity = .off;sim.evaporates=false
+      func window(_ y:CGFloat)->WindowSurface {WindowSurface(id:41,frame:CGRect(x:100,y:y,width:1400,height:200),blockers:[],cornerRadius:18,cornerExponent:2.5,isDock:false)}
+      sim.updateWindows([window(100)])
+      for _ in 0..<120 {sim.step(dt:1/120,cursor:SIMD2(-1000,-1000))}
+      let pool=sim.water[1]
+      for x in stride(from:pool.origin.x,through:pool.origin.x+pool.width,by:4) {pool.hit(x:x,amount:4,impulse:0)}
+      var simulationMS=0.0
+      for frame in 1...14 {
+        if frame<=6 {sim.updateWindows([window(100+CGFloat(frame)*12)],interval:1/120)}
+        let start=CACurrentMediaTime();sim.step(dt:1/120,cursor:SIMD2(-1000,-1000));simulationMS+=(CACurrentMediaTime()-start)*1000
+      }
+      var gpu=0.0,cpu=0.0
+      for _ in 0..<30 {
+        let pass=MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture=target;pass.colorAttachments[0].loadAction = .clear;pass.colorAttachments[0].storeAction = .store
+        let command=try XCTUnwrap(queue.makeCommandBuffer())
+        let start=CACurrentMediaTime()
+        let encoder=try XCTUnwrap(command.makeRenderCommandEncoder(descriptor:pass))
+        renderer.encode(with:encoder,light:SIMD3(repeating:1));encoder.endEncoding();command.commit()
+        cpu+=(CACurrentMediaTime()-start)*1000
+        command.waitUntilCompleted();XCTAssertNil(command.error)
+        gpu+=max(0,command.gpuEndTime-command.gpuStartTime)*1000
+      }
+      report.append(["surface":name,"particles":sim.particleCount,"simulation_ms":simulationMS/14,
+        "render_encode_cpu_ms":cpu/30,"gpu_ms":gpu/30,"device":device.name,"capture":"excluded"])
+    }
+    try FileManager.default.createDirectory(atPath:output,withIntermediateDirectories:true)
+    try JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys]).write(to:URL(fileURLWithPath:output).appendingPathComponent("dense-liquid-performance.json"))
+  }
+
+  func testLightningSplashRendersAVisibleCrown() throws {
+    let device=try metalDevice(),queue=try XCTUnwrap(device.makeCommandQueue())
+    let renderer=try WeatherRenderer(device:device,format:.rgba8Unorm,size:SIMD2(960,640),seed:42)
+    let sim=renderer.simulation;sim.intensity = .off;sim.evaporates=false
+    for x in stride(from:Float(0),through:960,by:4) {sim.water[0].hit(x:x,amount:14,impulse:0)}
+    for _ in 0..<60 {sim.step(dt:1/120,cursor:SIMD2(-1000,-1000))}
+    sim.lightningSplash(surface:sim.water[0],x:480)
+    let target=try texture(device,width:960,height:640)
+    for frame in 0..<25 {
+      sim.step(dt:1/120,cursor:SIMD2(-1000,-1000))
+      if [0,8,16,24].contains(frame) {
+        try render(renderer,target:target,queue:queue,background:MTLClearColorMake(0.04,0.05,0.06,1))
+        if let output=ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {
+          try export(bytes(target),width:960,height:640,path:"\(output)/lightning-crown-\(frame).png")
+        }
+      }
+    }
+    XCTAssertTrue(sim.particles.contains {$0.motion.w==9 && $0.rect.y>80})
+  }
+
+  func testProfileRapidPuddleSweepsWhenRequested() throws {
+    guard let output=ProcessInfo.processInfo.environment["ATMOS_BENCHMARK_DIR"] else {throw XCTSkip("Set ATMOS_BENCHMARK_DIR for cursor stress profiling")}
+    let device=try metalDevice(),queue=try XCTUnwrap(device.makeCommandQueue())
+    let native=ProcessInfo.processInfo.environment["ATMOS_SWEEP_NATIVE"]=="1"
+    let screen=NSScreen.main
+    let pointSize:SIMD2<Float>=native ? SIMD2(Float(screen?.frame.width ?? 1920),Float(screen?.frame.height ?? 1080)):SIMD2(1920,1080)
+    let scale=native ? Float(screen?.backingScaleFactor ?? 1):1
+    let renderer=try WeatherRenderer(device:device,format:.rgba8Unorm,size:pointSize,seed:42)
+    renderer.usesGPULiquidField = ProcessInfo.processInfo.environment["ATMOS_CPU_LIQUID_FIELD"] != "1"
+    let sim=renderer.simulation;sim.intensity = .off;sim.evaporates=false
+    for x in stride(from:Float(0),through:pointSize.x,by:4) {sim.water[0].hit(x:x,amount:18,impulse:0)}
+    for _ in 0..<60 {sim.step(dt:1/120,cursor:SIMD2(-1000,-1000))}
+    let target=try texture(device,width:Int(pointSize.x*scale),height:Int(pointSize.y*scale))
+    // The running app has already rendered while its puddle fills. Exclude the
+    // one-time pipeline/resource startup from the interaction stress measurement.
+    for _ in 0..<3 {_=try render(renderer,target:target,queue:queue)}
+    var simulation=[Double](),encoding=[Double](),gpu=[Double](),counts=[Int]()
+    let measuredFrames = max(48, Int(ProcessInfo.processInfo.environment["ATMOS_SWEEP_FRAMES"] ?? "48") ?? 48)
+    for frame in 0..<measuredFrames {
+      let point=SIMD2<Float>(native ? pointSize.x*(0.5+0.4*sin(Float(frame)*0.55)) : 800+650*sin(Float(frame)*0.55),8)
+      let start=CACurrentMediaTime();sim.step(dt:1/120,cursor:point);simulation.append((CACurrentMediaTime()-start)*1000)
+      counts.append(sim.particleCount)
+      let pass=MTLRenderPassDescriptor();pass.colorAttachments[0].texture=target
+      pass.colorAttachments[0].loadAction = .clear;pass.colorAttachments[0].storeAction = .store
+      let command=try XCTUnwrap(queue.makeCommandBuffer()),encodeStart=CACurrentMediaTime()
+      renderer.prepare(light: SIMD3(repeating: 1), command: command)
+      let encoder=try XCTUnwrap(command.makeRenderCommandEncoder(descriptor:pass))
+      renderer.encodeWater(with:encoder,includeGround:true);renderer.encodeAtmosphere(with:encoder,includeGround:true);encoder.endEncoding();command.commit()
+      encoding.append((CACurrentMediaTime()-encodeStart)*1000)
+      command.waitUntilCompleted();XCTAssertNil(command.error)
+      gpu.append(max(0,command.gpuEndTime-command.gpuStartTime)*1000)
+    }
+    func values(_ list:[Double])->[String:Double] {let s=list.sorted();return ["median":s[s.count/2],"p95":s[Int(Double(s.count-1)*0.95)],"maximum":s.last!]}
+    let report:[String:Any]=["device":device.name,"resolution":"\(target.width)x\(target.height)","simulation_ms":values(simulation),
+      "render_encode_cpu_ms":values(encoding),"gpu_ms":values(gpu),"maximum_particles":counts.max() ?? 0,"capture":"excluded",
+      "measured_frames":measuredFrames,"liquid_field":renderer.usesGPULiquidField ? "GPU with Rust fallback":"Rust",
+      "combined_liquid_frame_ms":values(simulation.indices.map {simulation[$0]+encoding[$0]+gpu[$0]})]
+    let label=ProcessInfo.processInfo.environment["ATMOS_SWEEP_LABEL"] ?? "current"
+    try FileManager.default.createDirectory(atPath:output,withIntermediateDirectories:true)
+    try JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys]).write(to:URL(fileURLWithPath:output).appendingPathComponent("puddle-sweep-\(label).json"))
+  }
+
+  func testOrganicLiquidSilhouettesHaveVisibleSoftLobes() throws {
+    let device=try metalDevice(),queue=try XCTUnwrap(device.makeCommandQueue())
+    let library=try device.makeLibrary(source:weatherShaderSource,options:nil)
+    let descriptor=MTLRenderPipelineDescriptor()
+    descriptor.vertexFunction=library.makeFunction(name:"weatherVertex")
+    descriptor.fragmentFunction=library.makeFunction(name:"weatherFragment")
+    let attachment=descriptor.colorAttachments[0]!
+    attachment.pixelFormat = .rgba8Unorm;attachment.isBlendingEnabled=true
+    attachment.sourceRGBBlendFactor = .one;attachment.sourceAlphaBlendFactor = .one
+    attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha;attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+    let pipeline=try device.makeRenderPipelineState(descriptor:descriptor)
+    var particles=[WeatherParticle](),field=[SIMD4<Float>]()
+    for i in 0..<6 {
+      let centre=SIMD2<Float>(150+Float(i%3)*300,150+Float(i/3)*300)
+      particles.append(WeatherParticle(rect:SIMD4(centre.x,centre.y,35,35),motion:SIMD4(20,90,0.03+Float(i)*0.13,9),color:SIMD4(0,0,0,1),life:SIMD4(2,10000,1,0)))
+      for _ in 0..<8 {field.append(SIMD4(centre.x,centre.y,17.5,1))}
+    }
+    let particleBuffer=try XCTUnwrap(device.makeBuffer(bytes:&particles,length:particles.count*MemoryLayout<WeatherParticle>.stride))
+    let fieldBuffer=try XCTUnwrap(device.makeBuffer(bytes:&field,length:field.count*16))
+    let scene=try texture(device,width:2,height:2)
+    let scenePixels:[UInt8]=[45,80,110,255,45,80,110,255,105,145,180,255,105,145,180,255]
+    scenePixels.withUnsafeBytes {scene.replace(region:MTLRegionMake2D(0,0,2,2),mipmapLevel:0,withBytes:$0.baseAddress!,bytesPerRow:8)}
+    let target=try texture(device,width:900,height:600)
+    let pass=MTLRenderPassDescriptor();pass.colorAttachments[0].texture=target
+    pass.colorAttachments[0].loadAction = .clear;pass.colorAttachments[0].storeAction = .store
+    pass.colorAttachments[0].clearColor=MTLClearColorMake(0.04,0.05,0.06,1)
+    let command=try XCTUnwrap(queue.makeCommandBuffer()),encoder=try XCTUnwrap(command.makeRenderCommandEncoder(descriptor:pass))
+    var uniforms=WeatherUniforms(viewSize:SIMD2(900,600),time:0.75,opacity:1,light:SIMD4(repeating:1))
+    uniforms.screen=SIMD4(900,600,600,0)
+    encoder.setRenderPipelineState(pipeline);encoder.setVertexBuffer(particleBuffer,offset:0,index:0)
+    encoder.setVertexBytes(&uniforms,length:MemoryLayout<WeatherUniforms>.stride,index:1)
+    encoder.setFragmentBytes(&uniforms,length:MemoryLayout<WeatherUniforms>.stride,index:1)
+    var dummy=SIMD4<Float>.zero
+    for index in [3,4,5] {encoder.setFragmentBytes(&dummy,length:16,index:index)}
+    encoder.setFragmentBuffer(fieldBuffer,offset:0,index:6);encoder.setFragmentTexture(scene,index:0)
+    encoder.drawPrimitives(type:.triangleStrip,vertexStart:0,vertexCount:4,instanceCount:6);encoder.endEncoding()
+    try synchronizeIfNeeded([target],into:command);command.commit();command.waitUntilCompleted();XCTAssertNil(command.error)
+    let pixels=bytes(target)
+    for i in 0..<6 {
+      let cx=150+Int(i%3)*300,cy=150+Int(i/3)*300
+      var radii=[Int]()
+      for ray in 0..<32 {
+        let angle=Double(ray)/32*2*Double.pi
+        var last=0
+        for r in 1..<90 {
+          let x=cx+Int((cos(angle)*Double(r)).rounded()),y=cy+Int((sin(angle)*Double(r)).rounded())
+          let j=((600-1-y)*900+x)*4
+          if max(abs(Int(pixels[j])-10),abs(Int(pixels[j+1])-13),abs(Int(pixels[j+2])-15))>10 {last=r}
+        }
+        radii.append(last)
+      }
+      XCTAssertGreaterThan((radii.max() ?? 0)-(radii.min() ?? 0),6,"The outline should visibly deform rather than remain circular")
+    }
+    if let output=ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {try export(pixels,width:900,height:600,path:"\(output)/organic-liquid-shapes.png")}
   }
 
   private func texture(_ device: MTLDevice, width: Int, height: Int) throws -> MTLTexture {

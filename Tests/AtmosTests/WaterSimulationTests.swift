@@ -51,12 +51,12 @@ final class WaterSimulationTests: XCTestCase {
 
   func testEveryEffectSurvivesLongFramesResizesAndModeChanges() {
     let simulation = WeatherSimulation(size: SIMD2(800, 600), seed: 8)
-    for effect in WeatherEffect.allCases where !effect.usesSnowSimulation {
+    for effect in WeatherEffect.allCases where !effect.usesSnowSimulation && effect != .none {
       simulation.setEffect(effect)
       for i in 0..<400 {
         simulation.step(dt: i % 7 == 0 ? 0.2 : 1.0 / 60, cursor: SIMD2(Float(i % 800), 10))
       }
-      XCTAssertFalse(simulation.particles.isEmpty, effect.title)
+      XCTAssertTrue(simulation.hasContent, effect.title)
       XCTAssertTrue(
         simulation.particles.allSatisfy { p in
           [p.rect.x, p.rect.y, p.rect.z, p.rect.w, p.motion.x, p.motion.y].allSatisfy(\.isFinite)
@@ -118,7 +118,7 @@ final class WaterSimulationTests: XCTestCase {
     simulation.step(dt: 1.0 / 30, cursor: SIMD2(300, 8))
     XCTAssertTrue(simulation.interactive, "Vertical strokes should disturb the water too")
     XCTAssertTrue(
-      simulation.particles.contains { $0.motion.w == 5 }, "A fast sweep should throw droplets")
+      simulation.particles.contains { $0.motion.w == 9 }, "A fast collision releases actual liquid")
   }
 
   func testMistBuildsOnWindowsAndClearsWithoutDriftingAway() {

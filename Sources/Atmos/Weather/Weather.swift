@@ -1,10 +1,13 @@
 import Foundation
 
 enum WeatherEffect: String, CaseIterable, Codable {
-  case snow, leaves, rain, drizzle, storm, lightning, sleet, hail, mist, clouds, sunlight, fireflies
+  case none, snow, leaves, rain, drizzle, storm, lightning, sleet, hail, mist, clouds, sunlight,
+    fireflies
+  case cherryBlossoms, dandelionSeeds, rosePetals, mapleSeeds, cottonwood, butterflies, birds
 
   var title: String {
     switch self {
+    case .none: "Off"
     case .snow: "Snow"
     case .leaves: "Autumn Leaves"
     case .rain: "Rain"
@@ -17,11 +20,19 @@ enum WeatherEffect: String, CaseIterable, Codable {
     case .clouds: "Cloud Wisps"
     case .sunlight: "Sunbeams"
     case .fireflies: "Fireflies"
+    case .cherryBlossoms: "Cherry Blossoms"
+    case .dandelionSeeds: "Dandelions"
+    case .rosePetals: "Rose Petals"
+    case .mapleSeeds: "Maple Seeds"
+    case .cottonwood: "Cottonwood Fluff"
+    case .butterflies: "Butterflies"
+    case .birds: "Birds"
     }
   }
 
   var symbol: String {
     switch self {
+    case .none: "circle"
     case .snow: "snowflake"
     case .leaves: "leaf"
     case .rain, .drizzle: "cloud.rain"
@@ -33,10 +44,32 @@ enum WeatherEffect: String, CaseIterable, Codable {
     case .clouds: "cloud"
     case .sunlight: "sun.max"
     case .fireflies: "sparkles"
+    case .cherryBlossoms, .rosePetals: "camera.macro"
+    case .dandelionSeeds, .cottonwood: "wind"
+    case .mapleSeeds: "leaf"
+    case .butterflies: "butterfly"
+    case .birds: "bird"
     }
   }
 
-  var usesSnowSimulation: Bool { self == .snow || self == .leaves }
+  static let seasonal: [Self] = [
+    .leaves, .cherryBlossoms, .dandelionSeeds, .rosePetals, .mapleSeeds, .cottonwood,
+  ]
+  static let wildlife: [Self] = [.butterflies, .fireflies, .birds]
+  var isStacked: Bool { Self.seasonal.contains(self) || Self.wildlife.contains(self) }
+  var usesSnowSimulation: Bool { self == .snow || Self.seasonal.contains(self) }
+  /// Shared leaf renderer style; zero is snow, one preserves the original autumn artwork.
+  var botanicalStyle: Float {
+    switch self {
+    case .leaves: 1
+    case .cherryBlossoms: 2
+    case .dandelionSeeds: 3
+    case .rosePetals: 4
+    case .mapleSeeds: 5
+    case .cottonwood: 6
+    default: 0
+    }
+  }
   var hasWater: Bool { [.rain, .drizzle, .storm, .lightning, .sleet].contains(self) }
   var hasBanks: Bool { self == .mist || self == .clouds }
   var canAccumulate: Bool { usesSnowSimulation || hasWater || hasBanks }
@@ -56,9 +89,17 @@ struct WeatherSnapshot: Decodable, Equatable {
   var reportedCondition: String? = nil
   var preferredEffect: WeatherEffect? = nil
   var precipitationUnit = "mm"
+  var interval: Double? = nil
+  var windGust: Double? = nil
+  /// Rounded, in-memory coordinate for seasonal timing; never persisted.
+  var latitude: Double? = nil
+  var precipitationRate: Double {
+    precipitationUnit == "mm/h" ? precipitation : precipitation * 3600 / (interval ?? 900)
+  }
 
   enum CodingKeys: String, CodingKey {
-    case time
+    case time, interval
+    case windGust = "wind_gusts_10m"
     case weatherCode = "weather_code"
     case temperature = "temperature_2m"
     case windSpeed = "wind_speed_10m"
@@ -71,7 +112,7 @@ struct WeatherSnapshot: Decodable, Equatable {
   }
 
   var effect: WeatherEffect {
-    if let preferredEffect { return preferredEffect }
+    if let preferredEffect, !preferredEffect.isStacked { return preferredEffect }
     // Precipitation takes precedence over wind: a windy snowstorm should still snow.
     switch weatherCode {
     case 71, 73, 75, 77, 85, 86: return .snow
@@ -83,9 +124,8 @@ struct WeatherSnapshot: Decodable, Equatable {
     case 45, 48: return .mist
     default: break
     }
-    if windSpeed >= 25 { return .leaves }
     if weatherCode == 3 { return .clouds }
-    return isDay == 1 ? .sunlight : .fireflies
+    return isDay == 1 ? .sunlight : .none
   }
 
   var intensity: Snowfall {
@@ -138,7 +178,10 @@ struct WeatherSnapshot: Decodable, Equatable {
     let humidityValid = humidity.map { $0.isFinite && (0...100).contains($0) } ?? true
     let cloudsValid = cloudCover.map { $0.isFinite && (0...100).contains($0) } ?? true
     let feelsValid = apparentTemperature.map { $0.isFinite && (-120...80).contains($0) } ?? true
-    return humidityValid && cloudsValid && feelsValid && age >= -900 && age <= 7200
+    let intervalValid = interval.map { $0.isFinite && (60...3600).contains($0) } ?? true
+    let gustValid = windGust.map { $0.isFinite && (0...500).contains($0) } ?? true
+    return humidityValid && cloudsValid && feelsValid && intervalValid && gustValid && age >= -900
+      && age <= 7200
       && temperature.isFinite && (-120...80).contains(temperature) && windSpeed.isFinite
       && windSpeed >= 0 && windSpeed <= 500 && windDirection.isFinite
       && (0...360).contains(windDirection)
@@ -184,7 +227,7 @@ enum WeatherAPI {
       .init(
         name: "current",
         value:
-          "weather_code,temperature_2m,apparent_temperature,relative_humidity_2m,cloud_cover,wind_speed_10m,wind_direction_10m,precipitation,is_day"
+          "weather_code,temperature_2m,apparent_temperature,relative_humidity_2m,cloud_cover,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation,is_day"
       ),
       .init(name: "wind_speed_unit", value: "kmh"), .init(name: "timeformat", value: "unixtime"),
       .init(name: "forecast_days", value: "1"),
@@ -193,39 +236,59 @@ enum WeatherAPI {
   }
 }
 
-/// One coherent scene. Secondary layers share the same renderer, flow grid and frame budget.
+/// Weather remains the base layer; seasonal material and wildlife have independent lifetimes.
 struct WeatherScene: Equatable {
   var primary: WeatherEffect
   var clouds: Float = 0
   var sunlight: Float = 0
-  var fireflies: Float = 0
+  var fireflies: Float = 0  // Legacy secondary-layer compatibility.
   var strength: Float = 1
+  var dynamics: WeatherDynamics?
+  var stacked: WeatherEffect?
+  var wildlife: WeatherEffect?
+  var overlayStrength: Float = 1
 
-  init(primary: WeatherEffect) { self.primary = primary }
-  init(weather: WeatherSnapshot) {
+  init(primary: WeatherEffect, stacked: WeatherEffect? = nil, wildlife: WeatherEffect? = nil) {
+    self.primary = primary
+    self.stacked = stacked
+    self.wildlife = wildlife
+  }
+  init(weather: WeatherSnapshot, date: Date = Date()) {
     primary = weather.effect
-    let cover =
-      Float(
-        weather.cloudCover
-          ?? (weather.weatherCode == 2
-            ? 45 : weather.weatherCode == 3 ? 95 : weather.precipitation > 0 ? 75 : 0)) / 100
-    clouds =
-      primary == .clouds || primary == .mist || primary == .storm || primary == .lightning
-      ? 0 : min(0.8, max(0, (cover - 0.08) * 0.85))
-    // Daylight through broken rain clouds, or a few fireflies beneath a lightly clouded night.
+    let dynamics = WeatherDynamics(weather: weather)
+    self.dynamics = dynamics
+    clouds = dynamics.cloudCover
     sunlight =
-      weather.isDay == 1 && cover < 0.8 && primary != .sunlight && primary != .clouds
-        && primary != .mist && primary != .storm && primary != .lightning ? (1 - cover) * 0.45 : 0
-    fireflies =
-      weather.isDay == 0 && cover < 0.7 && !primary.hasWater && primary != .fireflies
-        && primary != .mist ? (1 - cover) * 0.3 : 0
-    strength = 1
+      weather.isDay == 1 && ![WeatherEffect.storm, .lightning, .mist].contains(primary)
+      ? pow(1 - clouds, 2) : 0
+    strength = dynamics.precipitationStrength
+    let overlays = SeasonalWeather.overlays(weather: weather, date: date)
+    stacked = overlays.material
+    wildlife = overlays.wildlife
+    overlayStrength = overlays.strength
   }
   var summary: String {
-    var names = [primary.title]
-    if clouds > 0.05 { names.append("Light Clouds") }
-    if sunlight > 0.05 { names.append("Sunbeams") }
-    if fireflies > 0.05 { names.append("Fireflies") }
-    return names.joined(separator: " + ")
+    var names = primary == .none ? (dynamics != nil ? ["Clear night"] : []) : [primary.title]
+    if let dynamics, dynamics.cloudCover > 0, primary != .clouds {
+      names.append("Clouds \(Int((dynamics.cloudCover * 100).rounded()))%")
+    } else if clouds > 0.05 && primary != .clouds {
+      names.append("Clouds")
+    }
+    if sunlight > 0.05 && primary != .sunlight { names.append("Sunbeams") }
+    if let stacked { names.append(stacked.title) }
+    if let wildlife { names.append(wildlife.title) }
+    return names.isEmpty ? "All layers off" : names.joined(separator: " + ")
+  }
+}
+
+extension WeatherScene {
+  mutating func toggleManual(_ effect: WeatherEffect) {
+    if WeatherEffect.seasonal.contains(effect) {
+      stacked = stacked == effect ? nil : effect
+    } else if WeatherEffect.wildlife.contains(effect) {
+      wildlife = wildlife == effect ? nil : effect
+    } else {
+      primary = primary == effect ? .none : effect
+    }
   }
 }

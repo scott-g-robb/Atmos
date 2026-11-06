@@ -34,11 +34,14 @@ enum Preferences {
   private static let snowOnWindowsKey = "snowOnWindows"
   private static let welcomedKey = "welcomed"
   private static let showInScreenshotsKey = "showInScreenshots"
-  private static let halloweenKey = "halloweenOn"
-  private static let halloweenSkippedKey = "halloweenSkipped"
   private static let autumnKey = "autumn"
 
-  static func registerDefaults() {
+  static func registerDefaults(in store: UserDefaults = .standard) {
+    let defaults = store
+    let existing = [
+      "weatherEffect", "liveWeather", welcomedKey, snowfallKey, autumnKey, "atmosLayeredScenes1",
+    ]
+    .contains { defaults.object(forKey: $0) != nil }
     if !defaults.bool(forKey: "atmosMigratedPreferences3") {
       let domain = Bundle.main.bundleIdentifier ?? "dev.grobb.Atmos"
       var stored = defaults.persistentDomain(forName: domain) ?? [:]
@@ -52,6 +55,23 @@ enum Preferences {
       }
       defaults.set(true, forKey: "atmosMigratedPreferences3")
     }
+    if !defaults.bool(forKey: "atmosLayeredScenes1") {
+      let legacy =
+        defaults.string(forKey: "weatherEffect").flatMap(WeatherEffect.init(rawValue:))
+        ?? (defaults.bool(forKey: autumnKey) ? .leaves : .snow)
+      if legacy.isStacked {
+        defaults.set(
+          legacy.rawValue,
+          forKey: WeatherEffect.seasonal.contains(legacy) ? "seasonalDrift" : "wildlifeEffect")
+        defaults.set(WeatherEffect.none.rawValue, forKey: "weatherEffect")
+      }
+      defaults.set(true, forKey: "atmosLayeredScenes1")
+    }
+    if !existing {
+      // Persist initial scene choices so later launches do not interpret migration flags as a manual selection.
+      defaults.set(true, forKey: "liveWeather")
+      defaults.set(WeatherEffect.none.rawValue, forKey: "weatherEffect")
+    }
     let calm = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     defaults.register(defaults: [
       snowfallKey: (calm ? Snowfall.light : .steady).rawValue,
@@ -61,15 +81,20 @@ enum Preferences {
       accumulateKey: true,
       snowOnWindowsKey: true,
       showInScreenshotsKey: false,
-      halloweenKey: false,
-      halloweenSkippedKey: 0,
       autumnKey: false,
+      "weatherEffect": (existing ? WeatherEffect.snow : .none).rawValue,
+      "liveWeather": !existing,
     ])
   }
 
   static var snowfall: Snowfall {
     get { Snowfall(rawValue: defaults.integer(forKey: snowfallKey)) ?? .steady }
     set { defaults.set(newValue.rawValue, forKey: snowfallKey) }
+  }
+
+  static var manualWindSpeed: Double {
+    get {max(0,min(100,defaults.double(forKey:"manualWindSpeed")))}
+    set {defaults.set(max(0,min(100,newValue)),forKey:"manualWindSpeed")}
   }
 
   static var snowOnWindows: Bool {
@@ -105,18 +130,6 @@ enum Preferences {
   static var showInScreenshots: Bool {
     get { defaults.bool(forKey: showInScreenshotsKey) }
     set { defaults.set(newValue, forKey: showInScreenshotsKey) }
-  }
-
-  /// Halloween turned on from the menu, for every day.
-  static var halloween: Bool {
-    get { defaults.bool(forKey: halloweenKey) }
-    set { defaults.set(newValue, forKey: halloweenKey) }
-  }
-
-  /// The year whose Halloween was turned off from the menu, zero for none.
-  static var halloweenSkipped: Int {
-    get { defaults.integer(forKey: halloweenSkippedKey) }
-    set { defaults.set(newValue, forKey: halloweenSkippedKey) }
   }
 
   static var autumn: Bool {
@@ -182,5 +195,32 @@ extension Preferences {
   static var reflectionConsentIdentity: String {
     get { UserDefaults.standard.string(forKey: "reflectionConsentIdentity") ?? "" }
     set { UserDefaults.standard.set(newValue, forKey: "reflectionConsentIdentity") }
+  }
+}
+
+extension Preferences {
+  static var seasonalDrift: WeatherEffect? {
+    get {
+      defaults.string(forKey: "seasonalDrift").flatMap(WeatherEffect.init(rawValue:)).flatMap {
+        WeatherEffect.seasonal.contains($0) ? $0 : nil
+      }
+    }
+    set { defaults.set(newValue?.rawValue, forKey: "seasonalDrift") }
+  }
+  static var wildlifeEffect: WeatherEffect? {
+    get {
+      defaults.string(forKey: "wildlifeEffect").flatMap(WeatherEffect.init(rawValue:)).flatMap {
+        WeatherEffect.wildlife.contains($0) ? $0 : nil
+      }
+    }
+    set { defaults.set(newValue?.rawValue, forKey: "wildlifeEffect") }
+  }
+  static var manualScene: WeatherScene {
+    get { WeatherScene(primary: effect, stacked: seasonalDrift, wildlife: wildlifeEffect) }
+    set {
+      effect = newValue.primary
+      seasonalDrift = newValue.stacked
+      wildlifeEffect = newValue.wildlife
+    }
   }
 }

@@ -401,6 +401,18 @@ final class WindowTracker {
     fullScreenShare(in: Self.windowList(now: now))
   }
 
+  /// Does not depend on private Space metadata or Screen Recording permission.
+  func geometryShowsFullScreen(now: CFTimeInterval) -> Bool {
+    guard !missionControlShows(now: now) else { return false }
+    let frames = Self.windowList(now: now).compactMap { entry -> CGRect? in
+      guard entry.layer == 0, entry.pid != ownPID, (entry.alpha ?? 0) > 0.98,
+        entry.onScreen != false, entry.owner != "Dock", entry.owner != "WindowManager"
+      else { return nil }
+      return entry.bounds
+    }
+    return FullScreenDetection.coversDisplay(screen, windows: frames)
+  }
+
   /// Whether Mission Control or App Exposé shows on this display.
   func missionControlShows(now: CFTimeInterval) -> Bool {
     Self.windowList(now: now).contains { entry in

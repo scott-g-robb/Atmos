@@ -1,4 +1,5 @@
 import MetalKit
+import CWeatherCore
 
 struct WeatherUniforms {
   var viewSize: SIMD2<Float>
@@ -13,6 +14,7 @@ struct WeatherUniforms {
   var pointer = SIMD4<Float>.zero
   var reflectionRect = SIMD4<Float>(0, 0, 1, 1)
   var viewport = SIMD4<Float>.zero
+  var climate = SIMD4<Float>.zero
 }
 
 final class WeatherRenderer {
@@ -31,6 +33,11 @@ final class WeatherRenderer {
   private var pointerAt: Double = -1
   private var frames: [MTLBuffer] = []
   private var heightFrames: [MTLBuffer] = []
+  private var liquidFrames: [MTLBuffer] = []
+  private var liquidNeighbourCache:MTLBuffer?
+  private let liquidPipelines: GPULiquidField.Pipelines?
+  private var gpuLiquidField: GPULiquidField?
+  var usesGPULiquidField = true
   private var capacity = 0
   private var heightCapacity = 0
   private var slot = 0
@@ -57,9 +64,11 @@ final class WeatherRenderer {
       water = reusing.water
       fallback = reusing.fallback
       smokePipelines = reusing.smokePipelines
+      liquidPipelines = reusing.liquidPipelines
       return
     }
-    let library = try device.makeLibrary(source: shaderSource, options: nil)
+    let library = try device.makeLibrary(source: shaderSource + "\n" + liquidFieldShaderSource, options: nil)
+    liquidPipelines = try? GPULiquidField.Pipelines(device: device, library: library)
     func pipeline(_ vertex: String, _ fragment: String) throws -> MTLRenderPipelineState {
       let descriptor = MTLRenderPipelineDescriptor()
       descriptor.vertexFunction = library.makeFunction(name: vertex)
@@ -159,6 +168,22 @@ final class WeatherRenderer {
         }
       }
     }
+    if simulation.effect.hasWater && simulation.particles.contains(where: { $0.motion.w == 9 }) {
+      let gpuEncoded = usesGPULiquidField && uploadAtmosphere && command.map {
+        gpuLiquidField?.encode(particles: buffer, count: simulation.particleCount,
+          output: liquidFrames[frameIndex], command: $0) ?? false
+      } == true
+      if !gpuEncoded {
+        if liquidNeighbourCache == nil {
+          liquidNeighbourCache = device.makeBuffer(length: 4096*9*16, options: .storageModeShared)
+        }
+        simulation.particles.withUnsafeBufferPointer { source in
+          sh_liquid_field(source.baseAddress,source.count,
+            liquidFrames[frameIndex].contents().bindMemory(to:SIMD4<Float>.self,capacity:capacity*8),
+            liquidNeighbourCache?.contents().bindMemory(to:SIMD4<Float>.self,capacity:4096*9))
+        }
+      }
+    }
     for (pool, offset) in pools {
       pool.heights.withUnsafeBufferPointer { source in
         heightFrames[frameIndex].contents().advanced(by: offset).copyMemory(
@@ -191,7 +216,7 @@ final class WeatherRenderer {
       }
     }
     uniforms.reflectionRect = reflectionRect
-    if simulation.effect.hasWater {
+    if simulation.effect.hasWater && !pools.isEmpty {
       updatePointer()
       uniforms.pointer = pointerInfo
     }
@@ -255,6 +280,7 @@ final class WeatherRenderer {
   ) {
     var u = uniforms
     u.surface = SIMD4(pool.origin.x, pool.origin.y, pool.width, pool.top + 2)
+    u.climate = SIMD4(pool.foam,pool.foamCenter,pool.foamRadius,0)
     let relevant = simulation.ripples.filter { abs($0.point.y - pool.origin.y) < 4 }
     u.details = SIMD4(
       Float(pool.heights.count), Float(relevant.count), Float(min(128, pool.blockers.count)),
@@ -305,8 +331,13 @@ final class WeatherRenderer {
     guard count > 0 else { return }
     var u = uniforms
     u.screen.w = Float(windowOccluders.count)
+    if let dynamics = simulation.dynamics {
+      u.climate = SIMD4(dynamics.cloudCover, dynamics.haze, simulation.wind, 1)
+    }
+    encoder.setFragmentTexture(reflection ?? fallback, index: 0)
     encoder.setRenderPipelineState(particles)
     encoder.setVertexBuffer(frames[atmosphereIndex], offset: 0, index: 0)
+    encoder.setFragmentBuffer(liquidFrames[atmosphereIndex],offset:0,index:6)
     encoder.setVertexBytes(&u, length: MemoryLayout<WeatherUniforms>.stride, index: 1)
     encoder.setFragmentBytes(&u, length: MemoryLayout<WeatherUniforms>.stride, index: 1)
     if clearBlockers {
@@ -324,12 +355,18 @@ final class WeatherRenderer {
     pointerPixels = nil
     frames.removeAll()
     heightFrames.removeAll()
+    liquidFrames.removeAll()
+    liquidNeighbourCache=nil
+    gpuLiquidField=nil
     pools.removeAll()
     capacity = 0
     heightCapacity = 0
   }
 
   private func updatePointer() {
+    // System cursor/image queries can block the render thread. Reuse the cached
+    // reflection while interacting; refresh its appearance when movement settles.
+    guard pointerTexture == nil || simulation.interaction.z<0.15 else {return}
     guard simulation.elapsed - pointerAt > 0.2 else { return }
     pointerAt = simulation.elapsed
     let cursor = NSCursor.currentSystem ?? .arrow
@@ -355,8 +392,16 @@ final class WeatherRenderer {
   }
 
   private func reserve(sprites: Int, heightBytes: Int) -> Bool {
+    if simulation.effect.hasWater && gpuLiquidField == nil, let liquidPipelines {
+      gpuLiquidField = try? GPULiquidField(device: device, pipelines: liquidPipelines)
+    }
     if frames.isEmpty || sprites > capacity {
-      capacity = max(256, sprites * 3 / 2)
+      capacity = max(simulation.effect.hasWater ? 8320 : 256, sprites * 3 / 2)
+      liquidFrames = (0..<2).compactMap { _ in
+        guard let buffer=device.makeBuffer(length:capacity*8*16,options:.storageModeShared) else {return nil}
+        buffer.contents().initializeMemory(as:UInt8.self,repeating:0,count:buffer.length)
+        return buffer
+      }
       frames = (0..<2).compactMap { _ in
         device.makeBuffer(
           length: capacity * MemoryLayout<WeatherParticle>.stride, options: .storageModeShared)
@@ -368,6 +413,6 @@ final class WeatherRenderer {
         device.makeBuffer(length: heightCapacity, options: .storageModeShared)
       }
     }
-    return frames.count == 2 && heightFrames.count == 2
+    return frames.count == 2 && heightFrames.count == 2 && liquidFrames.count == 2
   }
 }

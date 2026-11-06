@@ -25,11 +25,11 @@ final class WeatherTests: XCTestCase {
       }
     }
     XCTAssertEqual(Set(groups.flatMap(\.1)), WeatherSnapshot.knownCodes)
-    XCTAssertEqual(snapshot(code: 0, wind: 25).effect, .leaves)
-    XCTAssertEqual(snapshot(code: 3, wind: 50).effect, .leaves)
+    XCTAssertEqual(snapshot(code: 0, wind: 25).effect, .sunlight)
+    XCTAssertEqual(snapshot(code: 3, wind: 50).effect, .clouds)
     XCTAssertEqual(snapshot(code: 75, wind: 80).effect, .snow)
     XCTAssertEqual(snapshot(code: 65, wind: 80).effect, .rain)
-    XCTAssertEqual(snapshot(code: 0, day: 0).effect, .fireflies)
+    XCTAssertEqual(snapshot(code: 0, day: 0).effect, .none)
     XCTAssertFalse(snapshot(code: 123).isUsable())
   }
 
