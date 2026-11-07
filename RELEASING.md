@@ -33,10 +33,27 @@ WEATHERKIT_PROFILE="/absolute/path/to/WeatherKit.provisionprofile" \
 ./make-installer.sh
 ```
 
+The repository includes a native **Atmos.xcodeproj** target and shared scheme with
+WeatherKit enabled. `build.sh` uses this Xcode target when a profile is supplied;
+without one it retains the key-free Swift package/Open-Meteo source build.
+On this Mac, ignored `build/weatherkit-profile-path.txt` and
+`build/signing-identity.txt` remember the selected profile and certificate. Regenerate
+source references with `python3 scripts/generate-xcode-project.py` after adding files.
+Profile preparation validates platform, expiry, App ID, native WeatherKit permission,
+all-device distribution and the signing certificate. Private signing keys stay in
+Keychain; no private WeatherKit service key is embedded or required by users.
+
+Run `build/Atmos.app/Contents/MacOS/Atmos --verify-native-weatherkit` on the signed
+bundle before packaging. This checks the real native API at a fixed public test
+location, forbids the personal-key fallback, and prints only success or an error
+code. Build 63 passed this check. Public release notarization remains a separate
+step; no GitHub publishing occurs during local builds.
+
 The build validates and embeds the profile and adds its WeatherKit entitlements.
-Verify a live request with the enabled account before publishing. Automatic mode
-clearly falls back to Open-Meteo when Apple Weather is unavailable; selecting Apple
-Weather explicitly reports an error instead of silently changing providers.
+Verify a live request with the enabled account before publishing. Automatic and
+explicit Apple modes retry Apple once after one second, then use a clearly labelled
+Open-Meteo fallback. Every new check starts with Apple again. Selecting Open-Meteo
+requests only that provider.
 
 For a personal WeatherKit service key, store credentials only in the login Keychain:
 
@@ -63,7 +80,7 @@ and a `notarytool` Keychain profile. The default profile name is `atmos`.
 
 ```sh
 xcrun notarytool store-credentials atmos
-./release.sh 0.14.0 "Release notes"
+./release.sh 0.14.1 "Release notes"
 ```
 
 The script tests and builds both architectures, notarizes and staples the app,
@@ -75,8 +92,8 @@ original Snowhush repository.
 
 Before uploading, test installation and permissions on a Mac that has not run a
 development build. Check the installed menu, all scenes, multi-display placement,
-full-screen suspension and reflection sources. GitHub CI verifies tests and produces
-an installer artifact; an unsigned CI artifact is not a notarized public release.
+full-screen suspension and reflection sources. Run the local test and packaging
+commands above; an unsigned build artifact is not a notarized public release.
 
 Upload source files through Git, and attach installers through GitHub Releases.
 Do not commit `.build/`, `build/`, `dist/`, credentials, profiles or signing keys.
@@ -142,8 +159,8 @@ must project a horizontal orbit around the stem, never a flat screen-plane pinwh
 Check diagonal window throws for both velocity components, cohesive blobs and thin
 ligaments during fast cursor strokes, and sharp foam bubbles fading within a second.
 All six floating drift styles must share splash momentum. Maple rotor inclination
-and lean must vary between individual seeds. The only 0.14 release artifact set is
-0.14.0 (build 52); discard superseded 0.14.1–0.14.3 packages.
+and lean must vary between individual seeds. The current release is 0.14.1 (build 65).
+Keep the previous stable 0.14.0 artifacts; discard superseded experimental packages.
 
 For build 50, check flotation on the landing frame and after water rises beneath
 existing litter; submerged aggregate litter must not cover the water. Confirm maple
@@ -185,3 +202,259 @@ command and set `ATMOS_SWEEP_LABEL=cpu`; omit it and label the second run `gpu`.
 `ATMOS_SWEEP_FRAMES` can extend the measurement beyond its default 48 frames.
 Memory allocation and splash-queue shifts are removed from the merging/draining paths;
 interaction and neighbourhood rejection avoid work outside their physical reach.
+
+## 0.14.1 weather checks
+
+Apple requests current conditions and alerts. REST requests include the location's ISO
+country code, obtained through geocoding; the machine's locale is not a location proxy.
+Unavailable or malformed alert data must not discard a valid current reading or cause
+an automatic switch away from Apple. Warnings remain in memory, with credentials in
+Keychain. Follow [Apple's alert attribution requirements](https://developer.apple.com/weatherkit/):
+preserve the complete original summary, the full agency name and an embedded details link.
+
+REST onset/end/expiry timestamps gate visual effects, including transitions between
+refreshes. Native WeatherKit exposes metadata validity dates rather than the REST
+event-onset/end fields; it uses that provider validity window and refreshes before expiry.
+Check active, future, expired and overlapping warnings, including fog mixed with rain.
+The observed condition stays separate from the warning's visual influence. Unknown
+hazards remain visible as warnings without inventing a measured rain or wind value.
+Open-Meteo's documented forecast API has no warning dataset: label availability honestly
+and keep its cloud/rain behaviour identical for the same measurements.
+
+Compare 32%, 58%, 99% and full cloud cover. Occupied width below the menu-bar clipping
+edge should match the
+reported coverage in the shared coverage field. Preserve the original soft volumetric
+appearance as the field moves with the wind. In calm rain, drops must originate beneath the cloud
+geometry; wind may carry falling rain into a gap. Increasing rain rates should deepen
+and darken the same coverage continuously. Clear Scene should dissolve existing clouds,
+then build cloud volume and width gradually after the clearing interval. Secondary fog,
+material and wildlife layers must not duplicate the sky.
+
+Build 54 restores the original 0.14.0 cloud shader's volume sampling, light extinction,
+colour and soft underside. Manual cloud and lightning canopies retain their original
+geometry, with a pixel comparison against the original fragment on light and dark
+backgrounds (maximum channel difference: 1). Live coverage calibrates that original
+continuous noise field to the requested width; it does not replace the cloud artwork.
+A GPU probe checks the actual coverage function against the CPU rain layout, separately
+from the volume's naturally translucent edges. Manual scenes avoid the calibration work.
+
+Build 55 gives mist a continuous background scattering layer, wider rolling banks,
+and a diffuse optical-depth treatment distinct from the cloud volume. The cloud
+renderer's original-appearance comparison must keep passing. Mist uses the same rounded
+window masking as background cloud wisps; its veil and ledge banks always stay behind
+windows. Roughly 95% of mist births choose the background, with at most one faint
+foreground volume (alpha at most 0.13). Pointer interaction must preserve that choice.
+
+Compare mist and cloud wisps on dark and light desktops with overlapping windows.
+Mist should cover substantially more desktop area and lower background contrast while
+application text stays clear. Check manual intensity, warning-driven fog, clear/reform
+transitions and scene retirement. `ATMOS_BENCHMARK_DIR=/tmp/atmos-performance ./test.sh`
+also records native-resolution fog simulation, CPU encoding and GPU work separately.
+The fog model integrates diffuse optical depth directly rather than adding cloud ray
+samples; measurements still exclude capture and do not establish other hardware's frame rate.
+
+## Build 56: fog bloom and setup
+
+The strongest currently active fog warning sets the broad haze's optical depth:
+minor 0.45, moderate 0.72, severe 0.90, extreme 1.00; unknown severity uses 0.65.
+These are visual weights, not claimed visibility measurements. Humidity must not
+override the severity distinction. Increases, decreases and expiry blend smoothly.
+
+Fog bloom includes windows, desktop icons, wallpaper and Atmos effects. A single
+ScreenCaptureKit stream serves fog and live water, excludes Atmos itself, and has
+no audio. Snapshot/Wallpaper water retains its selected source when fog needs live
+capture. Fog Bloom and Screen Reflections are independent controls. Test each
+combination, drying/retiring scenes, permission denial/revocation, Stop Sharing,
+fullscreen, locking and sleeping. Capture stops after the final visible consumer.
+Bloom uses a reused native-resolution scene target and a GPU-only, low-resolution
+linear-light separable blur. Native presentation stays unchanged. Record capture,
+simulation, CPU encoding and GPU work separately; the synthetic bloom benchmark
+excludes actual capture and must not be reported as whole-app performance.
+
+Onboarding appears once per app version/build, including upgrades from 0.13.2.
+Check the exact welcome copy, Back/Next/Skip, light/dark appearance, Reduce Motion,
+all permission states and returning from System Settings. No permission is needed
+to continue. Open at Login is optional. The guide must track the actual status icon,
+stay above other windows, allow clicks through to the icon, and fade only when the
+root Atmos menu opens. Setup completion is persisted only after Skip or that click;
+quitting mid-setup presents it again. Show Setup can replay it without changing
+weather preferences. System permission prompts must stay in front of setup itself.
+
+
+## Builds 57–62: updates, pause and native fog occlusion
+
+Check welcome, four permission/preference rows, Back/Next/Skip and the menu-bar
+arrow. Effects and capture remain paused until Skip or completion. Weather/location
+alone prepare after Permissions → Next when Location is granted.
+A fresh install starts empty/manual. Skip preserves existing selections; completing
+setup enables Live Weather only when Location is granted. The icon-led unfolding
+entrance respects Reduce Motion. Automatic Updates is opt-in, not a macOS grant.
+
+Dense fog, cloud wisps and window-edge bloom render in a normal desktop-level window,
+outside the fixed overlay Space. WindowServer clips these layers to real window
+shapes during Genie minimization; CPU rectangles do not cut holes in this background.
+As of build 59, all mist wisps and bloom stay in this background. The foreground
+lighting window and inverse wallpaper stencil are removed. Dock/widget/icon halos
+are limited to 12% opacity and never filter the objects themselves. A GPU-backed
+wallpaper-only snapshot, refreshed at most once a minute while fog already has capture
+permission, separates objects from wallpaper detail. It adds no continuous stream.
+Test minimization for regular and maximized windows, yellow-button and Command-M,
+plus widgets and Dock icons on detailed wallpaper. Include wallpaper patches that
+match an object's colour: they must not punch an inverted pattern into that object.
+The mist-only foreground target must be transparent with bloom both on and off.
+Welcome, guide and update panels
+must stay above effects; they also have explicit overlay exclusions. Animation
+transforms compensate for AppKit's layer anchor to keep scaling centred. Check for
+Updates has a separate menu section below Settings. Test all reflection-source
+combinations, Stop Sharing, locking, sleeping and fullscreen suspension.
+
+The manual updater uses GitHub’s latest full release, parsing `Atmos X.X.X` from
+its name; tags can differ. Publish an Atmos DMG with the API SHA-256 digest or a
+matching `.sha256` asset. Keep the bundle identifier and Apple signing team stable.
+Unsigned/ad-hoc or foreign-publisher replacements are rejected. A certificate can
+rotate within the same Apple team. Developer ID signing/notarization remains the
+public release workflow. No publishing occurs when building locally.
+
+Automatic checks run about every two hours while awake, enabled and outside setup.
+They display no update UI, never request administrator access, and pass a one-use,
+version/build/path-bound receipt plus a relaunch flag to suppress welcome. A normal
+or manual relaunch cannot reuse that receipt. Manual updates retain their prompt
+and welcome. Test downloads, cancellation, digest mismatch, publisher checks,
+rollback, post-exit replacement and relaunch using isolated signed fixtures. The
+live API/download test uses `ATMOS_TEST_GITHUB=1`; it validates the published DMG
+without installing it over the running app. Administrator authorization still needs
+an interactive check on a standard-user Mac.
+
+Live location/weather failures share a bounded retry budget: 1, 2, 3, 5, 15 seconds,
+then 30 seconds until 15 total attempts have failed. Live Weather then turns off,
+its preference is persisted, and no temporary scene is selected. While awaiting a
+first usable reading, show no live effects. Existing manual selections are preserved.
+Automatic network, expiry and alert
+callbacks must not reset that budget or bypass a pending delay. Success, explicit
+Refresh Weather, provider/permission changes or resuming a live session resets it.
+Disabling Live Weather, sleeping, locking and entering setup cancel pending work. Verify
+exhaustion leaves no scheduled refresh and Live Weather is unchecked in the menu.
+
+Build 60 checks: reinstall an identical release manually and verify welcome returns;
+ordinary relaunches of that same installation must not repeat it. A valid one-use
+automatic receipt completes setup for only the new installation identity. Install
+helpers wait for every old PID before replacing any file in the installed bundle,
+and automatic open uses background activation. Test both helper paths using signed,
+isolated fixtures; never replace the real app during updater tests.
+
+Window bloom retains four GPU edge colours per tracked window. Geometry follows the
+native display rate while fog is active; colours refresh only after capture catches
+up to stationary bounds. Captured old/swept window regions are excluded from desktop
+object lighting, preventing trails. Check contact at the window shadow, fast diagonal
+drags, resizing, overlapping windows, minimizing and closing, with adaptive capture.
+Record capture, simulation, CPU encoding and GPU work separately.
+
+Check Next/Back throughout the welcome resize: both text and window centres stay
+fixed, and the two pages crossfade without lateral translation. Skip resumes all
+overlays with a 1.4-second eased introduction (shortened with Reduce Motion).
+The main menu has six primary items; manual sliders are in Manual Effects and hidden
+while Live Weather is enabled. Surfaces and the website link are in Settings.
+Test bird groups across many seeds: zero, one and multiple landings, spaced perches,
+varied dwell times, occasional companion groups and takeoff after a window shake.
+
+Build 61: exercise the LiveWeather coordinator with injected location/provider
+failures, not just its backoff calculation. After a paused setup, fail the first
+location request and first weather request separately: both must retry automatically
+after one real second. Temporary explicit-Apple unavailability must schedule recovery.
+Location and provider watchdogs use common run-loop modes so an open menu cannot
+stall them; provider requests time out after 25 seconds. A failed attempt releases
+pending work, while duplicate authorization callbacks cannot reset its retry budget.
+
+Hold the weather card open across failure/success: it must display the new reading
+without another menu update or manual refresh. Verify the exact 14 retry delays
+for 15 failed attempts, then Live Weather off, no placeholder scene and no automatic
+revival. Test pause/resume, late location callbacks and a non-cooperating cancelled
+provider result. Retry tests use synthetic coordinates, fake providers and no system
+permission requests, geocoding or network monitor. Full suite still includes the
+separate optional public GitHub download/signature check.
+
+Build 62: Permissions → Next starts location/weather immediately if Location is
+granted, with effects and capture still paused through the guide. The final menu
+click activates prepared data or keeps the existing request alive. Check both a
+completed fetch and an immediate click while location is still arriving. No Location
+grant means no preparation and no automatic Live Weather activation.
+
+The production location adapter owns an idle worker run loop and forwards callbacks
+in the main run loop's common modes, so a tracking menu cannot stall the first fix.
+The regression suite reproduces default-mode starvation, then exercises the actual
+adapter and AppDelegate/WelcomeController handoff with synthetic location readings.
+Apple gets two attempts, one second apart, before labelled Open-Meteo fallback in
+both Automatic and explicit Apple modes. Each provider attempt has a six-second
+deadline; the coordinator retains its 25-second overall watchdog. A non-cooperating
+SDK must neither block fallback nor restart it after cancellation. Every refresh
+starts with Apple again unless Open-Meteo was explicitly selected. Fullscreen pauses
+rendering without interrupting weather acquisition; lock/sleep still pause both.
+
+
+## Build 63: native WeatherKit and custom dropdown
+
+Verify the Developer ID signature, embedded macOS profile and WeatherKit entitlement
+on both architectures. The profile must authorize all devices, not a development
+UDID list. Native verification must succeed without personal credentials. Include
+Atmos.xcodeproj and its shared scheme in the source archive; exclude xcuserdata,
+profiles, certificates and private keys.
+
+Check the 320-point-wide, at-most-520-point-high dropdown on light/dark desktops and
+small/secondary displays. The triangle shares the panel's continuous outline and
+points toward the status icon. All pages scroll within the same stable footprint.
+Test outside-click dismissal, Escape, keyboard focus, repeated icon clicks, and
+closing the menu before opening setup, update or permission panels. The weather
+card opens full weather details/provider selection. Selected weather/drift/wildlife
+tiles toggle independently; manual sliders stay editable after leaving Live Weather.
+No menu timers or continuous animations should run while closed.
+
+
+## Build 64: presets and permission recovery
+
+Test default atmos1/atmos2 numbering, renaming, saving, updating, deleting and reload.
+Snapshots include weather, drift, wildlife, intensity and wind; applying one leaves
+Live Weather and restores the whole snapshot. The icon priority is weather → drift
+→ wildlife. Neither Save nor Return can save three empty selections. Global capture
+and privacy preferences are not part of presets. Storage stays in UserDefaults.
+
+Use an oversized attribution fixture: the Apple mark must remain bounded, with no
+duplicate provider row. Check loading → reading, butterfly-only scenes, full preset
+lists, returning to the top of a newly opened page and disabled Save appearance.
+The menu footprint and pointer remain unchanged.
+
+ScreenRecordingAccess centralizes preflight and explicit ScreenCaptureKit proof.
+A Recheck or return from deliberately opened Screen Recording settings can recover a
+stale false preflight; no background permission probing occurs. Successful checks do
+not start streams or reset an active capture. User-declined errors invalidate cached
+SDK proof; Stop Sharing remains distinct. macOS signing changes may require a fresh
+grant/relaunch; test those on a fresh installed copy. Restart waits for the current
+process to exit, and ordinary restarts do not bypass unfinished setup.
+
+
+## Build 65: quick presets, Advanced and visibility
+
+My atmosphere must open the saved list, not the editor, when any presets exist.
+Selecting a row changes the atmosphere without leaving the list. Each arrow reveals
+Edit/Delete; Edit opens that preset, Save returns to the list, and deleting the last
+preset opens an empty draft. New drafts use 4 km/h wind, Medium intensity and 0%
+cloud coverage. Name remains editable. Save is fixed bottom-right outside scrolling.
+Advanced is the fourth peer tab beside Weather, Drift and Wildlife; its intensity,
+wind and coverage values persist in snapshots. Earlier snapshots without coverage
+migrate to the original weather defaults (rain/snow 100%, clouds 65%, otherwise 0%).
+
+Ongoing rain/drizzle/storm/lightning/sleet/hail sources use the screen's top edge in
+cloud-covered columns. Test windows whose top lies inside the cloud band. Seasonal
+material, including leaves and other drifting drops, keeps its previous spawning.
+Loading-to-reading animates inside a fixed-size dropdown with reduced-motion support.
+
+Native WeatherKit converts visibility to metres; the personal REST path and
+Open-Meteo already report metres. Open-Meteo requests visibility in current variables.
+Missing/invalid visibility contributes no fog. A bounded logarithmic artistic mapping
+adds subtle haze at about 8 km (5 miles), thickening towards 100 m. Do not interpret
+an Apple Weather display abbreviation as metres without its unit. Visibility and
+active alert density use their maximum, never two separate fog overlays. Retain
+observed cloud cover/precipitation, soften sunlight, and reduce nature accents as
+visibility worsens. Local weather details show km or m. Test unknown/zero/extreme
+visibility, alert priority, one fog overlay, gradual arrival and legacy preset reload.
+Provider references: [WeatherKit visibility](https://developer.apple.com/documentation/weatherkit/currentweather/visibility)
+and [Open-Meteo current variables](https://open-meteo.com/en/docs).

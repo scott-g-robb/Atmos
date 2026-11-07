@@ -71,6 +71,7 @@ final class WindowTracker {
   /// Windows on their way out before the window list shows it, as during a minimize's genie animation;
   /// left out until they're gone or their time is up.
   private var leaving: [CGWindowID: CFTimeInterval] = [:]
+  var hasDepartingWindows: Bool { !leaving.isEmpty }
   private var pressedMinimize: CGWindowID?
   private var buttonDown = false
   /// When a modifier of a window shortcut was last seen held.
@@ -94,6 +95,7 @@ final class WindowTracker {
   /// Every app window on the screen at the last poll, in overlay coordinates, those filling it or too tall to
   /// carry snow too.
   private(set) var covers: [CGRect] = []
+  private(set) var coverIDs: [CGWindowID] = []
   /// Normal application windows only, excluding the Dock, menus and transient system panels.
   private(set) var applicationFrames: [CGRect] = []
   var applicationWindows: [CGWindowID: CGRect] { exposing ? [:] : windowFrames }
@@ -106,7 +108,7 @@ final class WindowTracker {
 
   /// Returns the windows when they changed since the last poll.
   /// `eager` polls every frame, e.g. while a mouse button is down and a drag may be starting.
-  func poll(now: CFTimeInterval, eager: Bool) -> WindowUpdate? {
+  func poll(now: CFTimeInterval, eager: Bool, frameInterval: Double = 1.0/62) -> WindowUpdate? {
     let interval = now - lastQuery
     let minimizing = watchForMinimize(now: now)
     // Panels like Spotlight vanish on a keystroke; once one has stayed a while it's more likely a long-lived floating window.
@@ -120,7 +122,7 @@ final class WindowTracker {
     let changes = WindowChanges.shared
     let notified = changeRevision != changes.revision
     guard
-      minimizing || now < slidingUntil || interval >= (closely || notified ? 1.0 / 62 : 0.2)
+      minimizing || now < slidingUntil || interval >= (closely || notified ? frameInterval : 0.2)
         || (!changes.available && watchedMoved())
     else { return nil }
     changeRevision = changes.revision
@@ -266,7 +268,8 @@ final class WindowTracker {
       else { return false }
       return bounds.contains(point)
     }
-    guard let front, let id = front.id, previous.contains(where: { $0.id == id }),
+    guard let front, let id = front.id,
+      windowFrames[id] != nil || previous.contains(where: { $0.id == id }),
       let bounds = front.bounds
     else { return nil }
     let dx = point.x - bounds.minX
@@ -297,6 +300,7 @@ final class WindowTracker {
     windowFrames = [:]
     watched = nil
     covers = []
+    coverIDs = []
     applicationFrames = []
   }
 
@@ -538,6 +542,7 @@ final class WindowTracker {
     var fresh: [CGWindowID: Double] = [:]
     var panels: [CGWindowID: CFTimeInterval] = [:]
     var windows: [CGRect] = []
+    var ids: [CGWindowID] = []
     var frames: [CGWindowID: CGRect] = [:]
     var checked: [CGWindowID: (bounds: CGRect, card: Bool)] = [:]
     exposing = false
@@ -548,8 +553,9 @@ final class WindowTracker {
       alphas = fresh
       panelsShownAt = panels
       let nextCovers = exposing ? [] : windows
-      if covers != nextCovers || windowFrames != frames { geometryRevision &+= 1 }
+      if covers != nextCovers || coverIDs != (exposing ? [] : ids) || windowFrames != frames { geometryRevision &+= 1 }
       covers = nextCovers
+      coverIDs = exposing ? [] : ids
       windowFrames = frames
       applicationFrames = exposing ? [] : Array(frames.values)
       cards = checked
@@ -598,7 +604,7 @@ final class WindowTracker {
       let onScreen = frame.maxX > 0 && frame.minX < screen.width && frame.maxY > 0
       let fills = fillsScreen(bounds)
 
-      if layer < dockLevel && !fading { windows.append(frame) }
+      if layer < dockLevel && !fading { windows.append(frame); ids.append(id) }
       if layer == 0 && !fading && id != 0 { frames[id] = frame }
       let coverOnly = coverOnlyOwners.contains(owner) && !shelf
       if roomAbove && onScreen && !fills && !coverOnly && !fading && bounds.width >= 80

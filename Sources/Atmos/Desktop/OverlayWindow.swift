@@ -1,12 +1,13 @@
 import AppKit
 
 final class OverlayWindow: NSWindow {
-  private static let desktopLevel = NSWindow.Level(
+  static let desktopLevel = NSWindow.Level(
     rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
   /// Just under the Dock, so its icons stay in front as they grow under the pointer.
   static let belowDockLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) - 1)
 
   private let frontLevel: NSWindow.Level
+  private let fixedSpace: Bool
 
   var behindWindows = false {
     didSet { updateLevel() }
@@ -27,9 +28,11 @@ final class OverlayWindow: NSWindow {
 
   init(
     screen: NSScreen,
-    level: NSWindow.Level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) - 1)
+    level: NSWindow.Level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) - 1),
+    fixedSpace: Bool = true
   ) {
     frontLevel = level
+    self.fixedSpace = fixedSpace
     super.init(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
     isOpaque = false
     backgroundColor = .clear
@@ -51,7 +54,7 @@ final class OverlayWindow: NSWindow {
 
   /// Keeps the overlay out of the user's Spaces, so a switch between them doesn't carry it off with their windows.
   func holdInPlace() {
-    FixedSpace.hold(self)
+    if fixedSpace { FixedSpace.hold(self) }
   }
 
   override var canBecomeKey: Bool { false }

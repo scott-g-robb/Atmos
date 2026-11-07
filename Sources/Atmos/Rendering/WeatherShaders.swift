@@ -31,6 +31,11 @@ let weatherShaderSource = """
       float b=weatherNoise(p.yz*2.13+float2(p.x*0.21,p.x*0.37));
       return a*0.68+b*0.32;
   }
+  static float cloudCoverage(float x,constant WeatherUniforms &u) {
+      if(u.climate.w<0.5)return 1.0;
+      float patch=weatherNoise(float2(x*0.0018-u.details.w,1.7));
+      return smoothstep(u.climate.x-0.012,u.climate.x+0.012,patch);
+  }
   static float4 weatherInk(float3 color,float light,float shadow) {
       light=saturate(light); shadow=saturate(shadow);
       return float4(color*light+float3(0.09,0.14,0.20)*shadow*(1.0-light),light+shadow*(1.0-light));
@@ -113,7 +118,7 @@ let weatherShaderSource = """
   }
   fragment float4 weatherFragment(WeatherOut in [[stage_in]],constant WeatherUniforms &u [[buffer(1)]], constant float4 *blockers [[buffer(3)]],constant float4 *smoke [[buffer(4)]],constant float4 *windows [[buffer(5)]],texture2d<float> scene [[texture(0)]],constant float4 *liquid [[buffer(6)]]) {
       if(in.world.y>=u.screen.z)discard_fragment();
-      if(in.kind==13.0 || (in.kind==2.0 && in.style>0.5 && in.background>0.5)) {
+      if(in.kind==13.0 || in.kind==15.0 || (in.kind==2.0 && in.background>0.5) || (in.kind==7.0 && in.style<0.5)) {
           for(int i=0;i<int(u.screen.w);i++) {
               float4 b=windows[i];float2 centre=(b.xy+b.zw)*0.5,halfSize=(b.zw-b.xy)*0.5;
               float corner=min(18.0,min(halfSize.x,halfSize.y));
@@ -122,6 +127,18 @@ let weatherShaderSource = """
           }
       }
       float2 p=in.uv*2.0-1.0;float radius=length(p);float alpha=in.color.a;float3 color=in.color.rgb;
+      if(in.kind==15.0) {
+          // Continuous aerial scattering, kept entirely behind application windows.
+          // Broad rolling density lowers contrast without a blur or screen capture.
+          float4 flow=smokeAt(in.world,smoke,u);
+          float2 q=in.world*float2(0.0035,0.007)-flow.xy*0.014+float2(-u.time*0.018,u.time*0.003);
+          float broad=weatherNoise(q),detail=weatherNoise(q*2.07+float2(7.3,-u.time*0.005));
+          float column=smoothstep(0.0,0.025,in.uv.y)*(1.0-smoothstep(0.25,1.0,in.uv.y));
+          float density=(0.60+0.24*broad+0.16*detail)*column;
+          float a=(1.0-exp(-density*(0.30+in.style)))*alpha;
+          float3 tint=mix(float3(0.67,0.74,0.79),float3(0.91,0.94,0.96),0.45+broad*0.35+detail*0.20);
+          return float4(tint*a,a);
+      }
       if(in.kind<0.5) {
           float end=pow(saturate(1.0-abs(p.y)),0.35);float taper=0.4+0.6*in.uv.y;
           float edge=exp(-p.x*p.x*3.0)*end*taper;
@@ -136,25 +153,33 @@ let weatherShaderSource = """
           return weatherInk(color,shape*alpha*0.88,shape*alpha*0.48);
       }
       if(in.kind==2.0 || in.kind==7.0 || in.kind==12.0) {
-          bool bank=in.kind==7.0;bool cloud=in.kind==12.0;bool storm=cloud && in.style>0.5;
+          bool bank=in.kind==7.0;bool cloud=in.kind==12.0;float shade=cloud?saturate(in.style):0.0;
+          bool fog=!cloud && in.style<0.5;
           if(bank) for(int i=0;i<int(u.details.z);i++){float4 b=blockers[i];if(in.world.x>=b.x && in.world.x<=b.z && in.world.y>=b.y && in.world.y<=b.w)discard_fragment();}
           float4 flow=smokeAt(in.world,smoke,u);
           float2 advected=in.world*0.011-flow.xy*0.018+float2(-u.time*(0.018+u.climate.z*0.0005),in.seed*19.0);
+          if(fog)advected=in.world*float2(0.0065,0.010)-flow.xy*0.022+float2(-u.time*0.014,in.seed*19.0);
           float envelope;
           if(cloud) {
               float lower=0.12+weatherNoise(float2(in.world.x*0.009-u.time*0.012,7.3))*0.42;
               envelope=smoothstep(lower-0.16,lower+0.2,in.uv.y);
-              if(u.climate.w>0.5) {
-                  float patch=weatherNoise(float2(in.world.x*0.0018-u.time*u.climate.z*0.000025,1.7));
-                  float threshold=1.0-u.climate.x;
-                  // Near-overcast has almost no gaps; cover is never capped at the old 80%.
-                  envelope*=smoothstep(threshold-0.06,threshold+0.06,patch);
-              }
+              envelope*=abs(in.background);
+              envelope*=cloudCoverage(in.world.x,u);
           } else if(bank) {
               envelope=smoothstep(0.0,0.09,min(in.uv.x,1.0-in.uv.x))*smoothstep(0.0,0.11,in.uv.y)*(1.0-smoothstep(0.30,0.98,in.uv.y));
-          } else { envelope=exp(-dot(p*float2(1,1.15),p*float2(1,1.15))*2.6); }
+          } else { envelope=exp(-dot(p*float2(1,1.15),p*float2(1,1.15))*(fog?1.35:2.6)); }
           if(!cloud)envelope*=smoothstep(0.0,0.20,min(min(in.uv.x,1-in.uv.x),min(in.uv.y,1-in.uv.y)));
           if(envelope==0.0 || alpha==0.0)discard_fragment();
+          if(fog) {
+              // Fog is diffuse scattering through a continuous medium. Integrate
+              // its optical depth directly instead of self-shadowing cloud billows.
+              float coarse=volumeNoise(float3(advected,in.seed*8.0+u.time*0.006));
+              float fine=weatherNoise(advected*1.73+float2(3.1,in.seed*7.0));
+              float density=(0.45+coarse*0.35+fine*0.20)*envelope*mix(0.70,1.35,saturate(flow.z*1.6));
+              float a=(1.0-exp(-density*2.2))*alpha;
+              float3 tint=color*(0.84+coarse*0.12+fine*0.04);
+              return float4(tint*a,a);
+          }
           float transmittance=1;float3 scattering=0;
           // Integrate density along a short 3D ray, with light extinction within each billow.
           for(int sample=0;sample<6;sample++) {
@@ -162,10 +187,10 @@ let weatherShaderSource = """
               float3 pos=float3(advected+float2(z*0.43,z*0.12),z*2.8+in.seed*8);
               float n=volumeNoise(pos);float shape=smoothstep(0.22,0.77,n);
               float density=shape*envelope*mix(0.18,1.0,saturate(flow.z*1.6))*(1.0+u.climate.y*0.25);
-              float absorb=1.0-exp(-density*(storm?0.83:0.39));
+              float absorb=1.0-exp(-density*mix(0.39,0.83,shade));
               float lit=0.35+0.65*saturate(n*0.85+z*0.22);
-              float3 tint=storm ? mix(float3(0.10,0.12,0.16),float3(0.38,0.41,0.46),lit) : mix(color*0.60,color,lit);
-              if(storm)tint+=float3(0.48,0.55,0.72)*u.atmosphere.w;
+              float3 tint=mix(mix(color*0.60,color,lit),mix(float3(0.10,0.12,0.16),float3(0.38,0.41,0.46),lit),shade);
+              if(cloud)tint+=float3(0.48,0.55,0.72)*u.atmosphere.w*shade;
               scattering+=transmittance*absorb*tint;transmittance*=1.0-absorb;
           }
           float a=(1-transmittance)*alpha;

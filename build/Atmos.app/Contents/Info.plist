@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>BuildMachineOSBuild</key>
+	<string>26A428</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
@@ -9,6 +11,8 @@
 	<key>CFBundleExecutable</key>
 	<string>Atmos</string>
 	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.grobb.Atmos</string>
@@ -19,9 +23,29 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.14.0</string>
+	<string>0.14.1</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>MacOSX</string>
+	</array>
 	<key>CFBundleVersion</key>
-	<string>52</string>
+	<string>65</string>
+	<key>DTCompiler</key>
+	<string>com.apple.compilers.llvm.clang.1_0</string>
+	<key>DTPlatformBuild</key>
+	<string>26B118</string>
+	<key>DTPlatformName</key>
+	<string>macosx</string>
+	<key>DTPlatformVersion</key>
+	<string>27.2</string>
+	<key>DTSDKBuild</key>
+	<string>26B118</string>
+	<key>DTSDKName</key>
+	<string>macosx27.2</string>
+	<key>DTXcode</key>
+	<string>2720</string>
+	<key>DTXcodeBuild</key>
+	<string>27B52</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.lifestyle</string>
 	<key>LSMinimumSystemVersion</key>
@@ -30,13 +54,11 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 grobb. Portions © 2026 Mykhailo Bezruchko.</string>
 	<key>NSLocationUsageDescription</key>
 	<string>Live Weather uses your approximate location for local conditions from Apple Weather, or Open-Meteo when Apple Weather is unavailable. The menu shows the active source.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>Screen Reflections uses small, temporary images of this display to reflect windows in rain puddles. Images stay on this Mac and are never saved or uploaded.</string>
-	<key>NSHumanReadableCopyright</key>
-	<string>© 2026 grobb. Portions © 2026 Mykhailo Bezruchko.</string>
-	<key>CFBundleIconName</key>
-	<string>AppIcon</string>
+	<string>Atmos uses temporary images of this display for live water reflections and coloured glow around windows and desktop icons in fog. Images stay on this Mac and are never saved or uploaded.</string>
 </dict>
 </plist>

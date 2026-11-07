@@ -30,9 +30,13 @@ final class InteractionRegressionTests: XCTestCase {
     let mist = WeatherSimulation(size: SIMD2(1512, 982), seed: 7)
     mist.setEffect(.mist)
     mist.step(dt: 1 / 120, cursor: SIMD2(-1000, -1000))
-    XCTAssertTrue(
-      mist.particles.filter { $0.motion.w == 2 }.allSatisfy { $0.life.z == 0 },
-      "Mist keeps its existing interaction and depth")
+    let mistDepth = Dictionary(uniqueKeysWithValues: mist.particles.filter { $0.motion.w == 2 }.map { ($0.motion.z, $0.life.z) })
+    XCTAssertGreaterThanOrEqual(mistDepth.values.filter { $0 == 1 }.count, mistDepth.count - 1,
+      "Dense mist stays behind windows, with at most one faint foreground volume")
+    for _ in 0..<10 { mist.step(dt: 1 / 120, cursor: SIMD2(500, 300)) }
+    for p in mist.particles where p.motion.w == 2 {
+      if let depth = mistDepth[p.motion.z] { XCTAssertEqual(p.life.z, depth, "Pointer interaction must preserve mist depth") }
+    }
   }
 
   private func window(

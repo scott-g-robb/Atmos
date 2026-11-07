@@ -10,6 +10,7 @@ final class WeatherMenuCard: NSView {
   private let metrics = NSTextField(wrappingLabelWithString: "")
   private let layers = NSTextField(wrappingLabelWithString: "")
   private let updated = NSTextField(labelWithString: "")
+  private let alerts = NSStackView()
 
   init() {
     super.init(frame: NSRect(x: 0, y: 0, width: 306, height: 216))
@@ -34,7 +35,11 @@ final class WeatherMenuCard: NSView {
     icon.contentTintColor = .controlAccentColor
     icon.widthAnchor.constraint(equalToConstant: 42).isActive = true
     icon.heightAnchor.constraint(equalToConstant: 42).isActive = true
-    let stack = NSStackView(views: [location, headline, condition, metrics, layers, updated])
+    alerts.orientation = .vertical
+    alerts.alignment = .leading
+    alerts.spacing = 5
+    alerts.isHidden = true
+    let stack = NSStackView(views: [location, alerts, headline, condition, metrics, layers, updated])
     stack.orientation = .vertical
     stack.alignment = .leading
     stack.spacing = 8
@@ -48,6 +53,7 @@ final class WeatherMenuCard: NSView {
       condition.widthAnchor.constraint(equalTo: stack.widthAnchor),
       metrics.widthAnchor.constraint(equalTo: stack.widthAnchor),
       layers.widthAnchor.constraint(equalTo: stack.widthAnchor),
+      alerts.widthAnchor.constraint(equalTo: stack.widthAnchor),
     ])
   }
   required init?(coder: NSCoder) { nil }
@@ -63,6 +69,40 @@ final class WeatherMenuCard: NSView {
   ) {
     location.stringValue = place
     location.toolTip = detail
+    for view in alerts.arrangedSubviews { alerts.removeArrangedSubview(view); view.removeFromSuperview() }
+    let now = Date()
+    if let reading {
+      for alert in reading.visibleAlerts(at: now) {
+        let field = NSTextField(wrappingLabelWithString: "")
+        field.isSelectable = true
+        field.allowsEditingTextAttributes = true
+        field.maximumNumberOfLines = 0
+        // Keep the agency's complete wording, with an embedded details link.
+        let text = NSMutableAttributedString(string: alert.summary + "\n" + alert.source,
+          attributes: [.font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: NSColor.labelColor, .link: alert.detailsURL])
+        field.attributedStringValue = text
+        field.toolTip = alert.detailsURL.absoluteString
+        alerts.addArrangedSubview(field)
+        field.widthAnchor.constraint(equalTo: alerts.widthAnchor).isActive = true
+        if now < alert.starts {
+          let start = DateFormatter.localizedString(from: alert.starts, dateStyle: .short, timeStyle: .short)
+          let timing = NSTextField(wrappingLabelWithString: "Starts \(start)")
+          timing.font = .systemFont(ofSize: 11); timing.textColor = .secondaryLabelColor
+          alerts.addArrangedSubview(timing)
+        } else if !alert.isActive(at: now) {
+          let timing = NSTextField(labelWithString: "Event ended · Warning still reported")
+          timing.font = .systemFont(ofSize: 11); timing.textColor = .secondaryLabelColor
+          alerts.addArrangedSubview(timing)
+        }
+      }
+      if !reading.alertsAvailable {
+        let label = NSTextField(wrappingLabelWithString: "Weather warnings unavailable")
+        label.font = .systemFont(ofSize: 11); label.textColor = .secondaryLabelColor
+        alerts.addArrangedSubview(label)
+      }
+    }
+    alerts.isHidden = alerts.arrangedSubviews.isEmpty
     if let reading {
       temperature.stringValue = "\(Int(reading.temperature.rounded()))°"
       condition.stringValue =
@@ -91,9 +131,9 @@ final class WeatherMenuCard: NSView {
         : "Effects follow your location while Live Weather is on."
       layers.stringValue =
         live
-        ? "Temporary scene · \(Preferences.manualScene.summary)"
+        ? "Waiting for local weather · No temporary scene"
         : "Manual scene · \(Preferences.manualScene.summary)"
-      updated.stringValue = "Refreshes every 15 minutes"
+      updated.stringValue = "Updates automatically"
     }
     layoutSubtreeIfNeeded()
     setFrameSize(NSSize(width: 306, height: max(190, subviews[0].fittingSize.height + 24)))

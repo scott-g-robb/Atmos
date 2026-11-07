@@ -87,11 +87,86 @@ final class MetalRenderingTests: XCTestCase {
     XCTAssertGreaterThan(clippedAlpha, 100, "Occasional foreground wisps remain visible")
   }
 
+  func testFogIsBroaderThanWispsAndStaysBehindWindowContent() throws {
+    let device = try metalDevice(), queue = try XCTUnwrap(device.makeCommandQueue())
+    let target = try texture(device, width: 960, height: 600)
+    var fields = [WeatherEffect: [UInt8]]()
+    for effect in [WeatherEffect.clouds, .mist] {
+      let renderer = try WeatherRenderer(device: device, format: .rgba8Unorm, size: SIMD2(960, 600), seed: 6)
+      renderer.setEffect(effect); renderer.simulation.scene.includesSky = false
+      for _ in 0..<1200 { renderer.simulation.step(dt: 1/120, cursor: SIMD2(-1000, -1000)) }
+      try render(renderer, target: target, queue: queue)
+      fields[effect] = bytes(target)
+      if let output = ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {
+        for (name, level) in [("dark",0.025),("light",0.96)] {
+          try render(renderer,target:target,queue:queue,background:MTLClearColorMake(level,level,level,1))
+          try export(bytes(target),width:960,height:600,path:"\(output)/fog-compare-\(effect.rawValue)-\(name).png")
+        }
+      }
+      if effect == .mist {
+        renderer.windowOccluders = [SIMD4(180,150,780,500)]
+        try render(renderer,target:target,queue:queue)
+        let masked = bytes(target)
+        var maximum: UInt8 = 0
+        for y in 175..<475 { for x in 205..<755 {maximum=max(maximum,masked[((600-y-1)*960+x)*4+3])} }
+        XCTAssertLessThanOrEqual(maximum,34,"Only the single faint foreground volume may pass over window content")
+        if let output = ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {
+          try render(renderer,target:target,queue:queue,background:MTLClearColorMake(0.025,0.025,0.025,1))
+          try export(bytes(target),width:960,height:600,path:"\(output)/fog-window-safe.png")
+        }
+      }
+    }
+    let fog = try XCTUnwrap(fields[.mist]), wisps = try XCTUnwrap(fields[.clouds])
+    let fogArea = stride(from:3,to:fog.count,by:4).filter {fog[$0]>16}.count
+    let wispArea = stride(from:3,to:wisps.count,by:4).filter {wisps[$0]>16}.count
+    XCTAssertGreaterThan(fogArea,wispArea*2,"Fog should be a continuous, more notable atmosphere than separate cloud wisps")
+    let row = 600-150-1
+    XCTAssertGreaterThan((0..<960).filter {fog[(row*960+$0)*4+3]>16}.count,850)
+  }
+
+  func testFogOpacityFollowsSeverityAcrossBothBanksAndBroadHaze() throws {
+    let device=try metalDevice(),queue=try XCTUnwrap(device.makeCommandQueue())
+    let target=try texture(device,width:960,height:600)
+    var previous=0
+    for severity in [LocalWeatherAlert.Severity.minor,.moderate,.severe,.extreme] {
+      let renderer=try WeatherRenderer(device:device,format:.rgba8Unorm,size:SIMD2(960,600),seed:6)
+      renderer.setEffect(.mist);renderer.simulation.scene.includesSky=false
+      renderer.simulation.scene.fog=severity.fogDensity
+      for _ in 0..<1800 {renderer.simulation.step(dt:1/120,cursor:SIMD2(-1000,-1000))}
+      try render(renderer,target:target,queue:queue)
+      let pixels=bytes(target)
+      let coverage=stride(from:3,to:pixels.count,by:4).reduce(0){$0+Int(pixels[$1])}
+      XCTAssertGreaterThan(coverage,previous)
+      previous=coverage
+    }
+  }
+
+  func testBackgroundMistHidesBehindWindowsWhileFaintForegroundRemains() throws {
+    let device = try metalDevice(), queue = try XCTUnwrap(device.makeCommandQueue())
+    var selected: WeatherRenderer?
+    for seed in UInt64(1)...150 {
+      let candidate = try WeatherRenderer(device:device,format:.rgba8Unorm,size:SIMD2(960,600),seed:seed)
+      candidate.setEffect(.mist)
+      candidate.simulation.step(dt:1/120,cursor:SIMD2(-1000,-1000))
+      if candidate.simulation.particles.contains(where:{$0.motion.w==2 && $0.life.z<0.5}) {selected=candidate;break}
+    }
+    let renderer = try XCTUnwrap(selected)
+    for _ in 0..<240 {renderer.simulation.step(dt:1/120,cursor:SIMD2(-1000,-1000))}
+    let target = try texture(device,width:960,height:600)
+    try render(renderer,target:target,queue:queue)
+    let full = bytes(target), total = stride(from:3,to:full.count,by:4).reduce(0){$0+Int(full[$1])}
+    renderer.windowOccluders=[SIMD4(-100,-100,1060,700)]
+    try render(renderer,target:target,queue:queue)
+    let clipped=bytes(target),remaining=stride(from:3,to:clipped.count,by:4).reduce(0){$0+Int(clipped[$1])}
+    XCTAssertGreaterThan(remaining,100,"Occasional foreground mist stays visible")
+    XCTAssertLessThan(Double(remaining),Double(total)*0.10,"The dense fog layers must stay behind windows")
+  }
+
   func testOptimizedWeatherMatchesOriginalImages() throws {
     let device = try metalDevice()
     let queue = try XCTUnwrap(device.makeCommandQueue())
     for effect in WeatherEffect.allCases
-    where [.hail, .mist, .clouds, .sunlight, .fireflies].contains(effect) {
+    where [.hail, .clouds, .sunlight, .fireflies].contains(effect) {
       let optimized = try WeatherRenderer(
         device: device, format: .rgba8Unorm, size: SIMD2(960, 600), seed: 8173)
       let reference = try WeatherRenderer(
@@ -99,6 +174,9 @@ final class MetalRenderingTests: XCTestCase {
         shaderSource: referenceWeatherShaderSource, seed: 8173)
       for renderer in [optimized, reference] {
         renderer.setEffect(effect)
+        // Isolate the unchanged wisps, banks and particles. The original canopy
+        // has its own strict comparison; mist is intentionally refined separately.
+        renderer.simulation.scene.includesSky = false
         renderer.simulation.intensity = .heavy
         renderer.simulation.wind = 36
         renderer.simulation.updateWindows([
@@ -1150,6 +1228,112 @@ final class MetalRenderingTests: XCTestCase {
       XCTAssertGreaterThan((radii.max() ?? 0)-(radii.min() ?? 0),6,"The outline should visibly deform rather than remain circular")
     }
     if let output=ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {try export(pixels,width:900,height:600,path:"\(output)/organic-liquid-shapes.png")}
+  }
+
+  func testRestoredCloudVolumeMatchesTheOriginalAppearance() throws {
+    let device = try metalDevice(), queue = try XCTUnwrap(device.makeCommandQueue())
+    let start = try XCTUnwrap(weatherShaderSource.range(of: "    if(in.kind==2.0 || in.kind==7.0 || in.kind==12.0) {"))
+    let end = try XCTUnwrap(weatherShaderSource.range(of: "    if(in.kind==13.0) {", range: start.upperBound..<weatherShaderSource.endIndex))
+    let referenceSource = weatherShaderSource.replacingCharacters(in: start.lowerBound..<end.lowerBound, with: originalCloudVolumeFragment)
+    for effect in [WeatherEffect.clouds, .lightning] {
+      let restored = try WeatherRenderer(device: device, format: .rgba8Unorm, size: SIMD2(960, 600), seed: 77181)
+      let original = try WeatherRenderer(device: device, format: .rgba8Unorm, size: SIMD2(960, 600), shaderSource: referenceSource, seed: 77181)
+      for renderer in [restored, original] {
+        renderer.setEffect(effect)
+        for _ in 0..<600 { renderer.simulation.step(dt: 1/30, cursor: SIMD2(-1000, -1000)) }
+        let cloud = try XCTUnwrap(renderer.simulation.decorations.first { $0.motion.w == 12 })
+        let cover: Float = effect == .clouds ? 0.65 : 1
+        let height = min(Float(600)*0.35, effect == .clouds ? 90+cover*130 : 220)*(0.65+0.35*cover)
+        XCTAssertEqual(cloud.rect, SIMD4(480,600-height*0.35,1056,height*1.5), "Preserve the original broad canopy geometry")
+      }
+      for level in [0.025, 0.96] {
+        let a = try texture(device, width: 960, height: 600), b = try texture(device, width: 960, height: 600)
+        try render(restored, target: a, queue: queue, background: MTLClearColorMake(level,level,level,1))
+        try render(original, target: b, queue: queue, background: MTLClearColorMake(level,level,level,1))
+        let error = zip(bytes(a),bytes(b)).map { abs(Int($0)-Int($1)) }.max() ?? 0
+        XCTAssertLessThanOrEqual(error,1,"Restore the original soft volume, lighting and colour")
+        if let output = ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {
+          let name = "\(effect.rawValue)-\(level<0.5 ? "dark":"light")"
+          try export(bytes(a),width:960,height:600,path:"\(output)/restored-\(name).png")
+          try export(bytes(b),width:960,height:600,path:"\(output)/original-\(name).png")
+        }
+      }
+    }
+  }
+
+  func testLiveCloudCoverageFillsTheReportedWidthAndRendersVisibleClouds() throws {
+    let device = try metalDevice(), queue = try XCTUnwrap(device.makeCommandQueue())
+    // Probe the very same coverage function used by the volume, before its
+    // naturally translucent light extinction and feathered edge are applied.
+    let maskSource = weatherShaderSource.replacingOccurrences(of: "float envelope;",
+      with: "          if(cloud)return float4(1.0)*step(0.5,cloudCoverage(in.world.x,u));\n          float envelope;")
+    XCTAssertNotEqual(maskSource, weatherShaderSource)
+    for cover in [32.0, 58, 99] {
+      let renderer = try WeatherRenderer(device: device, format: .rgba8Unorm, size: SIMD2(960, 600), seed: 42)
+      let maskRenderer = try WeatherRenderer(device: device, format: .rgba8Unorm, size: SIMD2(960, 600), shaderSource: maskSource, seed: 42)
+      var reading = WeatherSnapshot(time: Date().timeIntervalSince1970, weatherCode: 1,
+        temperature: 12, windSpeed: 0, windDirection: 0, precipitation: 0, isDay: 0)
+      reading.cloudCover = cover; reading.precipitationUnit = "mm/h"
+      for item in [renderer,maskRenderer] {
+        item.setEffect(.none); item.contentTop = 572
+        item.simulation.scene = WeatherScene(weather: reading)
+        for _ in 0..<1200 { item.simulation.step(dt: 1/120, cursor: SIMD2(-1000, -1000)) }
+      }
+      let target = try texture(device, width: 960, height: 600)
+      let row = 600 - Int(renderer.contentTop) + 1
+      try render(maskRenderer, target: target, queue: queue)
+      let mask = bytes(target)
+      let occupied = (0..<960).filter { mask[(row*960+$0)*4+3]>128 }.count
+      XCTAssertEqual(Double(occupied)/960,cover/100,accuracy:0.008,"The original volume's coverage field must fill the reported width")
+      let agreement = (0..<960).filter {
+        (mask[(row*960+$0)*4+3]>128) == renderer.simulation.sky.contains(x:Float($0)+0.5)
+      }.count
+      XCTAssertGreaterThan(Double(agreement)/960,0.99,"Rain and rendered clouds must share the same field")
+      try render(renderer, target: target, queue: queue)
+      let pixels = bytes(target)
+      let visible = (0..<960).filter { pixels[(row*960+$0)*4+3]>16 }.count
+      XCTAssertGreaterThan(Double(visible)/960,cover/100*0.65,"Partial cloud cover must remain visible with the original soft rendering")
+      if let output = ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {
+        try render(renderer, target: target, queue: queue, background: MTLClearColorMake(0.025, 0.025, 0.025, 1))
+        try export(bytes(target), width: 960, height: 600, path: "\(output)/sky-\(Int(cover)).png")
+      }
+    }
+  }
+
+  func testProfileFogAndWispsAtNativeResolutionWhenRequested() throws {
+    guard let output=ProcessInfo.processInfo.environment["ATMOS_BENCHMARK_DIR"] else {throw XCTSkip("Set ATMOS_BENCHMARK_DIR for native fog profiling")}
+    let device=try metalDevice(),queue=try XCTUnwrap(device.makeCommandQueue()),screen=NSScreen.main
+    let size=SIMD2<Float>(Float(screen?.frame.width ?? 1512),Float(screen?.frame.height ?? 982))
+    let scale=Float(screen?.backingScaleFactor ?? 2)
+    let target=try texture(device,width:Int(size.x*scale),height:Int(size.y*scale))
+    var reports=[[String:Any]]()
+    for effect in [WeatherEffect.clouds,.mist] {
+      let renderer=try WeatherRenderer(device:device,format:.rgba8Unorm,size:size,seed:6)
+      renderer.setEffect(effect);renderer.simulation.scene.includesSky=false;renderer.simulation.intensity = .heavy
+      renderer.windowOccluders=[SIMD4(size.x*0.1,size.y*0.25,size.x*0.45,size.y*0.8),SIMD4(size.x*0.6,size.y*0.2,size.x*0.9,size.y*0.7)]
+      for _ in 0..<1200 {renderer.simulation.step(dt:1/120,cursor:SIMD2(-1000,-1000))}
+      var simulation=[Double](),encoding=[Double](),gpu=[Double]()
+      for frame in 0..<63 {
+        let start=CACurrentMediaTime()
+        renderer.simulation.step(dt:1/120,cursor:SIMD2(size.x*0.5+sin(Float(frame)*0.15)*100,size.y*0.3))
+        let sim=(CACurrentMediaTime()-start)*1000
+        let command=try XCTUnwrap(queue.makeCommandBuffer()),encoded=CACurrentMediaTime()
+        renderer.prepare(light:SIMD3(repeating:1),command:command)
+        let pass=MTLRenderPassDescriptor();pass.colorAttachments[0].texture=target
+        pass.colorAttachments[0].loadAction = .clear;pass.colorAttachments[0].storeAction = .store
+        let encoder=try XCTUnwrap(command.makeRenderCommandEncoder(descriptor:pass))
+        renderer.encodeWater(with:encoder,includeGround:true);renderer.encodeAtmosphere(with:encoder,includeGround:true)
+        encoder.endEncoding();command.commit();let cpu=(CACurrentMediaTime()-encoded)*1000
+        command.waitUntilCompleted();XCTAssertNil(command.error)
+        if frame>=3 {simulation.append(sim);encoding.append(cpu);gpu.append(max(0,command.gpuEndTime-command.gpuStartTime)*1000)}
+      }
+      func values(_ list:[Double])->[String:Double] {let s=list.sorted();return ["median":s[s.count/2],"p95":s[Int(Double(s.count-1)*0.95)],"maximum":s.last!]}
+      reports.append(["effect":effect.rawValue,"device":device.name,"resolution":"\(target.width)x\(target.height)",
+        "simulation_ms":values(simulation),"render_encode_cpu_ms":values(encoding),"gpu_ms":values(gpu),
+        "combined_frame_ms":values(simulation.indices.map{simulation[$0]+encoding[$0]+gpu[$0]}),"capture":"excluded"])
+    }
+    try FileManager.default.createDirectory(atPath:output,withIntermediateDirectories:true)
+    try JSONSerialization.data(withJSONObject:reports,options:[.prettyPrinted,.sortedKeys]).write(to:URL(fileURLWithPath:output).appendingPathComponent("fog-native-performance.json"))
   }
 
   private func texture(_ device: MTLDevice, width: Int, height: Int) throws -> MTLTexture {

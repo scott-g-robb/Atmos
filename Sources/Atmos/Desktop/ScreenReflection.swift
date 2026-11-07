@@ -11,8 +11,10 @@ final class ScreenReflection: NSObject, SCStreamOutput, SCStreamDelegate {
   final class Frame {
     let texture: MTLTexture
     let uvRect: SIMD4<Float>
+    let capturedAt: Double
     private let pixelBuffer: CVPixelBuffer
-    init(texture: MTLTexture, pixelBuffer: CVPixelBuffer, uvRect: SIMD4<Float>) {
+    init(texture: MTLTexture, pixelBuffer: CVPixelBuffer, uvRect: SIMD4<Float>, capturedAt: Double = CACurrentMediaTime()) {
+      self.capturedAt = capturedAt
       self.uvRect = uvRect
       self.texture = texture
       self.pixelBuffer = pixelBuffer
@@ -46,8 +48,19 @@ final class ScreenReflection: NSObject, SCStreamOutput, SCStreamDelegate {
   private var permissionAt: CFTimeInterval = -100
   private var permission = false
   private(set) var displayedFrame: Frame?
+  private(set) var bloomTexture: MTLTexture?
+  private(set) var bloomRect = SIMD4<Float>(0, 0, 1, 1)
+  private(set) var waterRect = SIMD4<Float>(0, 0, 1, 1)
+  private var captureRequested = false
+  var fogBloomEnabled = false {
+    didSet { if fogBloomEnabled && !oldValue { stoppedByUser = false } }
+  }
   var maximumWidth: CGFloat = 1280 { didSet { if maximumWidth != oldValue { invalidate() } } }
   private var wallpaper: MTLTexture?
+  private var cleanWallpaper: Frame?
+  private var cleanWallpaperTask: Task<Void, Never>?
+  private var cleanWallpaperAt: CFTimeInterval = -100
+  var wallpaperTexture: MTLTexture? { cleanWallpaper?.texture ?? wallpaper }
   private var wallpaperURL: URL?
   private var wallpaperAt: CFTimeInterval = -100
   private var windowSnapshots: WindowReflections?
@@ -70,63 +83,77 @@ final class ScreenReflection: NSObject, SCStreamOutput, SCStreamDelegate {
     return latest
   }
 
-  func update(screen: NSScreen, now: CFTimeInterval, active: Bool, windows: [ReflectionWindow] = [])
-    -> MTLTexture?
+  func update(screen: NSScreen, now: CFTimeInterval, active: Bool,
+    windows: [ReflectionWindow] = [], water: Bool = true, fog: Bool = false) -> MTLTexture?
   {
-    guard active else {
-      stop()
-      return nil
-    }
+    guard active else { stop(); return nil }
     nativeFrameRate = max(1, screen.maximumFramesPerSecond)
     displayedFrame = nil
+    bloomTexture = nil
+    waterRect = SIMD4(0, 0, 1, 1)
     if now - wallpaperAt >= 60 {
       wallpaperAt = now
       updateWallpaper(screen)
     }
     if now - permissionAt > 2 {
       permissionAt = now
-      permission = CGPreflightScreenCaptureAccess()
+      permission = ScreenRecordingAccess.shared.isGranted
     }
-    if stoppedByUser {
+    let demand = DesktopCaptureDemand(water: water, fog: fog,
+      reflectionsEnabled: enabled, liveReflections: live, bloomEnabled: fogBloomEnabled)
+    captureRequested = demand.live && permission && !stoppedByUser
+    guard permission && !stoppedByUser && (demand.live || demand.snapshots) else {
       stopCapture()
       windowSnapshots?.stop()
       snapshotMode = false
-      status = "Wallpaper · Desktop capture stopped"
+      status = stoppedByUser ? "Wallpaper · Desktop capture stopped"
+        : demand.live || demand.snapshots ? "Wallpaper · Screen Recording permission needed"
+        : "Wallpaper reflections"
       return wallpaper
     }
-    guard enabled && permission else {
-      stopCapture()
-      windowSnapshots?.stop()
-      snapshotMode = false
-      status = enabled ? "Wallpaper · Screen Recording permission needed" : "Wallpaper reflections"
-      return wallpaper
-    }
-    if !live {
+    if demand.bloom { refreshCleanWallpaper(screen: screen, now: now) }
+    snapshotMode = false
+    if demand.snapshots {
       if windowSnapshots == nil {
         windowSnapshots = try? WindowReflections(device: device, displayID: displayID)
       }
       if let snapshots = windowSnapshots, !snapshots.unavailable {
-        stopCapture()
         snapshotMode = true
         snapshots.maximumWidth = maximumWidth
         snapshots.update(windows: windows, size: screen.frame.size, wallpaper: wallpaper, now: now)
-        status = "Window snapshots · Cached reflections"
-        return snapshots.texture ?? wallpaper
       }
+    } else {
+      windowSnapshots?.stop()
     }
-    snapshotMode = false
-    if stream == nil && task == nil && now >= retryAfter { start(screen: screen) }
-    updatePace()
-    if let frame {
-      displayedFrame = frame
-      status =
-        live
-        ? "Desktop reflections · Screen Recording active"
-        : "Live desktop · Snapshot capture unavailable"
-      return frame.texture
+    // One stream serves both uses. Snapshot/Wallpaper water keeps its selected
+    // source even when fog needs the live desktop for coloured bloom.
+    let needsLive = demand.live || (demand.snapshots && !snapshotMode)
+    captureRequested = needsLive
+    if needsLive {
+      if stream == nil && task == nil && now >= retryAfter { start(screen: screen) }
+      updatePace()
+      if let frame {
+        displayedFrame = frame
+        if demand.bloom {
+          bloomTexture = frame.texture
+          bloomRect = frame.uvRect
+        }
+        status = demand.bloom
+          ? (water && enabled ? "Water reflections & fog bloom · Screen Recording active"
+            : "Fog bloom · Screen Recording active")
+          : "Desktop reflections · Screen Recording active"
+        if water && enabled && !snapshotMode {
+          waterRect = frame.uvRect
+          return frame.texture
+        }
+      } else {
+        status = "Starting desktop capture…"
+      }
+    } else {
+      stopCapture()
+      status = "Window snapshots · Cached reflections"
     }
-    if now >= retryAfter { status = "Starting desktop reflections…" }
-    return wallpaper
+    return snapshotMode ? windowSnapshots?.texture ?? wallpaper : wallpaper
   }
 
   private func start(screen: NSScreen) {
@@ -139,7 +166,7 @@ final class ScreenReflection: NSObject, SCStreamOutput, SCStreamDelegate {
         // census may omit their owning application, defeating exclusion.
         let content = try await SCShareableContent.excludingDesktopWindows(
           false, onScreenWindowsOnly: false)
-        guard generation == token, enabled, !Task.isCancelled else { return }
+        guard generation == token, captureRequested, !Task.isCancelled else { return }
         guard let display = content.displays.first(where: { $0.displayID == self.displayID }) else {
           throw RendererError.unavailable
         }
@@ -201,10 +228,50 @@ final class ScreenReflection: NSObject, SCStreamOutput, SCStreamDelegate {
         updatePace()
       } catch {
         guard generation == token else { return }
+        ScreenRecordingAccess.shared.invalidateIfDenied(error)
         stopCapture()
         retryAfter = CACurrentMediaTime() + 20
         status = "Wallpaper · Desktop capture unavailable"
       }
+    }
+  }
+
+  /// Capture just the wallpaper occasionally while fog already has permission.
+  /// Unlike a file thumbnail this matches dynamic wallpaper, colour and cropping.
+  /// It is a single GPU-backed snapshot, never another continuous stream.
+  private func refreshCleanWallpaper(screen: NSScreen, now: CFTimeInterval) {
+    guard cleanWallpaperTask == nil, now-cleanWallpaperAt >= 60 else { return }
+    cleanWallpaperAt = now
+    let token = generation, size = screen.frame.size
+    cleanWallpaperTask = Task { @MainActor [weak self] in
+      guard let self else { return }
+      defer { if generation == token { cleanWallpaperTask = nil } }
+      do {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        guard generation == token, !Task.isCancelled,
+          let display = content.displays.first(where: { $0.displayID == self.displayID }) else { return }
+        let iconLevel = Int(CGWindowLevelForKey(.desktopIconWindow))
+        let excluded = content.windows.filter {
+          $0.windowLayer >= iconLevel || $0.owningApplication?.processID == ProcessInfo.processInfo.processIdentifier
+        }
+        let config = SCStreamConfiguration()
+        config.width = 640; config.height = max(2, Int(640*size.height/max(1,size.width)))
+        config.pixelFormat = kCVPixelFormatType_32BGRA; config.capturesAudio = false; config.showsCursor = false
+        config.sourceRect = CGRect(origin: .zero, size: size)
+        config.destinationRect = CGRect(x: 0, y: 0, width: config.width, height: config.height)
+        config.preservesAspectRatio = false; config.scalesToFit = true; config.colorSpaceName = CGColorSpace.sRGB
+        let sample = try await SCScreenshotManager.captureSampleBuffer(
+          contentFilter: SCContentFilter(display: display, excludingWindows: excluded), configuration: config)
+        guard generation == token, !Task.isCancelled,
+          let buffer = CMSampleBufferGetImageBuffer(sample),
+          let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() else { return }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+          width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer), mipmapped: false)
+        descriptor.storageMode = .shared; descriptor.usage = .shaderRead
+        if let texture = device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0) {
+          cleanWallpaper = Frame(texture: texture, pixelBuffer: buffer, uvRect: SIMD4(0,0,1,1))
+        }
+      } catch { /* Keep the last valid wallpaper; no retry loop or permission prompt. */ }
     }
   }
 
@@ -318,7 +385,9 @@ final class ScreenReflection: NSObject, SCStreamOutput, SCStreamDelegate {
         }
       }
     #endif
-    let frame = Frame(texture: texture, pixelBuffer: buffer, uvRect: uv)
+    let stamp = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+    let frame = Frame(texture: texture, pixelBuffer: buffer, uvRect: uv,
+      capturedAt: stamp.isFinite && stamp>0 ? stamp : CACurrentMediaTime())
     lock.lock()
     if acceptedStream == ObjectIdentifier(stream) { latest = frame }
     lock.unlock()
@@ -332,6 +401,7 @@ final class ScreenReflection: NSObject, SCStreamOutput, SCStreamDelegate {
   }
 
   func captureStopped(with error: Error) {
+    ScreenRecordingAccess.shared.invalidateIfDenied(error)
     let error = error as NSError
     stoppedByUser =
       error.domain == SCStreamErrorDomain && error.code == SCStreamError.userStopped.rawValue
@@ -365,6 +435,9 @@ final class ScreenReflection: NSObject, SCStreamOutput, SCStreamDelegate {
   }
 
   func stop() {
+    cleanWallpaperTask?.cancel(); cleanWallpaperTask = nil; cleanWallpaper = nil; cleanWallpaperAt = -100
+    captureRequested = false
+    bloomTexture = nil
     stopCapture()
     windowSnapshots?.stop()
     snapshotMode = false
@@ -375,6 +448,7 @@ final class ScreenReflection: NSObject, SCStreamOutput, SCStreamDelegate {
     status = "Reflections paused"
   }
   func invalidate() {
+    cleanWallpaperTask?.cancel(); cleanWallpaperTask = nil; cleanWallpaper = nil; cleanWallpaperAt = -100
     stopCapture(preservingImage: true)
     windowSnapshots?.stop()
     snapshotMode = false

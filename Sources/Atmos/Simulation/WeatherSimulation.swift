@@ -446,8 +446,11 @@ final class WeatherSimulation {
   var time: Float { Float(elapsed.truncatingRemainder(dividingBy: 1000)) }
   private(set) var effect: WeatherEffect = .rain
   private(set) var smoke: SmokeSimulation?
+  private(set) var fogAmount: Float = 0
   var scene = WeatherScene(primary: .rain)
   private(set) var dynamics: WeatherDynamics?
+  private(set) var sky = CloudSky()
+  var skyCeiling: Float = .greatestFiniteMagnitude
   var airflow: WindField?
   private let birds = BirdFlock()
   func updateDynamics(dt: Float) {
@@ -565,6 +568,8 @@ final class WeatherSimulation {
     self.effect = effect
     scene = WeatherScene(primary: effect)
     smoke = nil
+    sky = CloudSky()
+    fogAmount = 0
     bolts.removeAll()
     birds.reset()
     nextStrike = elapsed + 4
@@ -722,6 +727,25 @@ final class WeatherSimulation {
         : (effect.hasWater || effect == .snow || effect == .hail
           ? dynamics?.precipitationStrength ?? 1 : 1))
       : presetMultiplier
+    if effect == .mist {
+      let moisture = dynamics?.haze ?? 0.7
+      let strength = scene.fog > 0 ? scene.fog
+        : dynamics == nil ? min(1, multiplier * 0.8) : 0.55 + moisture * 0.35
+      let target: Float = !retiring && !clearing && multiplier > 0 ? min(1, strength * density) : 0
+      let rate: Float = target > fogAmount ? 0.55 : clearing ? 2.2 : 0.65
+      fogAmount += (target - fogAmount) * (1 - exp(-dt * rate * retirementRate))
+    }
+    let storm = effect == .storm || effect == .lightning
+    let cloudCover: Float = scene.includesSky && !effect.isStacked
+      ? dynamics?.cloudCover
+        ?? scene.manualCloudCover
+        ?? (storm ? 1 : effect == .clouds ? 0.65 : effect.hasWater || effect == .hail ? 1 : scene.clouds) : 0
+    let rainLoad = dynamics.map { 1 - exp(-$0.precipitationRate / 3.2) }
+      ?? (storm ? 1 : effect.hasWater ? 0.32 : 0)
+    sky.step(size: SIMD2(size.x, max(1, min(size.y, skyCeiling))), cover: cloudCover, rainLoad: rainLoad, wind: wind, dt: dt,
+      active: !retiring && multiplier > 0 && cloudCover > 0, clearing: clearing, time: time,
+      calibrated: dynamics != nil || scene.manualCloudCover != nil)
+    let rainArea: Float = effect.hasWater || effect == .hail ? sky.occupiedWidth / max(1, size.x) : 1
     let layerStrength: Float = scene.dynamics != nil && !effect.isStacked ? 1 : scene.strength
     let area = min(8, size.x * size.y / 1_000_000)
     let slow: Float = reducedMotion ? 0.55 : 1
@@ -739,18 +763,18 @@ final class WeatherSimulation {
       case .butterflies: 0.18
       default: 0
       }
-    if !retiring, !primed, multiplier > 0, rate > 0 {
+    if !retiring, !clearing, !primed, multiplier > 0, rate > 0, rainArea > 0.001 {
       primed = true
       let prefill: Float = effect.hasWater || effect == .hail ? 0.65 : effect == .fireflies ? 6 : 8
       let count = min(
         240,
         max(
           effect == .fireflies ? 8 : 4,
-          Int(rate * area * multiplier * density * layerStrength * prefill)))
+          Int(rate * area * multiplier * density * layerStrength * prefill * rainArea)))
       for _ in 0..<count { append(makeParticle(initial: true)) }
     }
     if !retiring && !clearing {
-      emitted += rate * area * multiplier * density * layerStrength * slow * dt
+      emitted += rate * area * multiplier * density * layerStrength * slow * dt * rainArea
       let count = min(40, Int(emitted))
       emitted -= Float(count)
       for _ in 0..<count where particleCount < Self.capacity - 128 {
@@ -881,7 +905,7 @@ final class WeatherSimulation {
     let smoky =
       (!retiring
         && (effect.hasBanks || effect == .storm || effect == .lightning || scene.clouds > 0))
-      || decorations.contains { $0.motion.w == 7 || $0.motion.w == 12 }
+      || decorations.contains { $0.motion.w == 7 || $0.motion.w == 12 || $0.motion.w == 15 }
       || particles.contains { $0.motion.w == 2 }
     if smoky && multiplier > 0 {
       if smoke == nil { smoke = SmokeSimulation(size: size) }
@@ -904,6 +928,16 @@ final class WeatherSimulation {
   private func updateDecorations(dt: Float, multiplier: Float, clearing: Bool) {
     decorations.removeAll(keepingCapacity: true)
     stormDecorations(dt: dt, multiplier: multiplier, clearing: clearing)
+    if effect == .mist && fogAmount > 0.003 {
+      // A broad optical veil gives fog its continuous loss of contrast. It is
+      // always behind windows; small moving billows add depth within the veil.
+      let ceiling = max(1, min(size.y, skyCeiling))
+      let height = ceiling * (0.62 + fogAmount * 0.20)
+      decorations.append(WeatherParticle(
+        rect: SIMD4(size.x * 0.5, height * 0.5, size.x * 1.04, height),
+        motion: SIMD4(0, 0, 0.37, 15), color: SIMD4(0.82, 0.87, 0.90, fogAmount * 0.60),
+        life: SIMD4(2, 10000, 1, fogAmount)))
+    }
     if effect == .birds {
       birds.step(
         dt: dt, size: size, surfaces: surfaces, wind: wind, airflow: airflow,
@@ -924,13 +958,13 @@ final class WeatherSimulation {
             dt * retirementRate
               * (clearing || !accumulates ? 2 : target < bank.amount ? 0.18 : 0.38))
         guard bank.amount > 0.01 else { continue }
-        let height: Float = (effect == .mist ? 23 : 36) * bank.amount
+        let height: Float = (effect == .mist ? 46 : 36) * bank.amount
         decorations.append(
           WeatherParticle(
             rect: SIMD4(
               bank.origin.x + bank.width * 0.5, bank.origin.y + height * 0.5, bank.width, height),
             motion: SIMD4(0, 0, Float(bank.id % 97) * 0.013, 7),
-            color: SIMD4(0.88, 0.91, 0.97, (effect == .mist ? 0.50 : 0.43) * bank.amount),
+            color: SIMD4(0.88, 0.91, 0.97, (effect == .mist ? 0.65 : 0.43) * bank.amount),
             life: SIMD4(2, 10000, Float(bank.id), effect == .mist ? 0 : 1)))
       }
     }
@@ -953,19 +987,23 @@ final class WeatherSimulation {
   }
 
   private func stormDecorations(dt: Float, multiplier: Float, clearing: Bool) {
-    let storm = effect == .storm || effect == .lightning
-    let cover: Float =
-      dynamics != nil
-      ? (scene.clouds > 0 || storm || effect == .clouds ? dynamics!.cloudCover : 0)
-      : storm ? 1 : effect == .clouds ? 0.65 : scene.clouds
-    if cover > 0 && multiplier > 0 && !clearing {
-      let height = min(size.y * 0.35, storm ? 220 : 90 + cover * 130) * (0.65 + 0.35 * cover)
-      decorations.append(
-        WeatherParticle(
-          rect: SIMD4(size.x * 0.5, size.y - height * 0.35, size.x * 1.1, height * 1.5),
-          motion: SIMD4(0, 0, 0.37, 12),
-          color: storm ? SIMD4(0.20, 0.23, 0.28, 0.94) : SIMD4(0.78, 0.83, 0.90, 0.62 * cover),
-          life: SIMD4(2, 10000, 0, storm ? 1 : 0)))
+    if dynamics == nil, scene.manualCloudCover == nil, sky.cover > 0, sky.formation > 0.0001, scene.includesSky, !effect.isStacked {
+      // Restore the original broad volumetric canopy for manual scenes.
+      let storm = effect == .storm || effect == .lightning
+      let height = min(size.y * 0.35, storm ? 220 : 90 + sky.cover * 130) * (0.65 + 0.35 * sky.cover)
+      let opacity: Float = storm ? 0.94 : 0.62 * sky.cover
+      decorations.append(WeatherParticle(
+        rect: SIMD4(size.x * 0.5, size.y - height * 0.35, size.x * 1.1, height * 1.5),
+        motion: SIMD4(0, 0, 0.37, 12), color: SIMD4(0.78, 0.83, 0.90, opacity),
+        life: SIMD4(2, 10000, sky.formation, storm ? 1 : 0)))
+    } else if sky.cover > 0, sky.formation > 0.0001, scene.includesSky, !effect.isStacked {
+      // The same broad, soft volume as before. Coverage is a continuous field
+      // within it, rather than separately drawn blocks or solid puff models.
+      decorations.append(WeatherParticle(
+        rect: SIMD4(size.x*0.5, sky.ceiling-sky.depth*(0.35/1.5), size.x*1.1, sky.depth),
+        motion: SIMD4(0,0,0.37,12),
+        color: SIMD4(0.78,0.83,0.90,0.62+0.32*sky.darkness),
+        life: SIMD4(2,10000,sky.formation,sky.darkness)))
     }
     for i in bolts.indices { bolts[i].life.x += dt * retirementRate }
     bolts.removeAll { $0.life.x > $0.life.y }
@@ -1033,7 +1071,11 @@ final class WeatherSimulation {
 
   private func makeParticle(initial: Bool, mode: WeatherEffect? = nil) -> WeatherParticle {
     let effect = mode ?? self.effect
-    let point = SIMD2(range(-20, size.x + 20), initial ? range(0, size.y) : size.y + range(5, 45))
+    var point = SIMD2(range(-20, size.x + 20), initial ? range(0, size.y) : size.y + range(5, 45))
+    if effect.hasWater || effect == .hail, let source = sky.rainSource(unit()) {
+      point = source
+      if initial { point.y = range(0, max(1, source.y)) }
+    }
     switch effect {
     case .rain, .drizzle, .storm, .lightning: return drop(at: point, splash: false)
     case .sleet, .hail:
@@ -1043,16 +1085,26 @@ final class WeatherSimulation {
         rect: SIMD4(point.x, point.y, diameter, diameter),
         motion: SIMD4(wind * 0.5, -range(350, 650), unit(), 1),
         color: SIMD4(0.8, 0.92, 1, 0.9), life: SIMD4(0, 12, 0, 0))
-    case .mist, .clouds:
-      let mist = effect == .mist
-      let width = range(mist ? 220 : 200, mist ? 440 : 350)
+    case .mist:
+      let width = range(340, 680)
+      // Fog's larger volumes need a stricter foreground budget than wisps.
+      let foregroundFree = !particles.contains { $0.motion.w == 2 && $0.life.w < 0.5 && $0.life.z < 0.5 }
+      let background: Float = unit() < 0.95 || !foregroundFree ? 1 : 0
+      let y = range(size.y * 0.05, size.y * 0.70)
+      return WeatherParticle(
+        rect: SIMD4(range(0, size.x), y, width, width * range(0.32, 0.50)),
+        motion: SIMD4(range(-4, 6), range(-0.6, 0.6), unit(), 2),
+        color: SIMD4(0.83, 0.87, 0.91, background > 0.5 ? 0.68 : 0.13),
+        life: SIMD4(initial ? range(1, 7) : 0, range(24, 38), background, 0))
+    case .clouds:
+      let width = range(200, 350)
       // A stable depth choice keeps most cloud wisps behind application content.
-      let background: Float = !mist && unit() < 0.82 ? 1 : 0
+      let background: Float = unit() < 0.82 ? 1 : 0
       return WeatherParticle(
         rect: SIMD4(range(0, size.x), range(0, size.y), width, width * range(0.23, 0.39)),
         motion: SIMD4(range(-5, 8), range(-1, 1), unit(), 2),
-        color: SIMD4(0.86, 0.9, 0.97, mist ? 0.55 : 0.58),
-        life: SIMD4(initial ? range(1, 7) : 0, range(20, 34), background, mist ? 0 : 1))
+        color: SIMD4(0.86, 0.9, 0.97, 0.58),
+        life: SIMD4(initial ? range(1, 7) : 0, range(20, 34), background, 1))
     case .butterflies:
       let diameter = range(17, 28)
       return WeatherParticle(

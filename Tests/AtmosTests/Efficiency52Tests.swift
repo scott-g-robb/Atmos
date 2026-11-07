@@ -21,8 +21,9 @@ final class Efficiency52Tests: XCTestCase {
     let app = AppDelegate(), item = app.makeStatusItem()
     defer { NSStatusBar.system.removeStatusItem(item) }
     let menu = try XCTUnwrap(item.menu)
-    let wind = try XCTUnwrap(menu.items.compactMap { $0.view as? WindSlider }.first)
-    let intensity = try XCTUnwrap(menu.items.compactMap { $0.view as? SnowfallSlider }.first)
+    let manual = try XCTUnwrap(menu.items.first { $0.title == "Scene" || $0.title == "Manual Effects" }?.submenu)
+    let wind = try XCTUnwrap(manual.items.compactMap { $0.view as? WindSlider }.first)
+    let intensity = try XCTUnwrap(manual.items.compactMap { $0.view as? SnowfallSlider }.first)
     let windControl = try XCTUnwrap(wind.subviews.compactMap { $0 as? NSSlider }.first)
     let intensityControl = try XCTUnwrap(intensity.subviews.compactMap { $0 as? NSSlider }.first)
     app.menuWillOpen(menu)

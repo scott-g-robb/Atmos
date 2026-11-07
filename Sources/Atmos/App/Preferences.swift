@@ -7,7 +7,7 @@ enum Snowfall: Int, CaseIterable {
     switch self {
     case .off: "Off"
     case .light: "Light"
-    case .steady: "Steady"
+    case .steady: "Medium"
     case .heavy: "Heavy"
     case .variable: "Variable"
     }
@@ -69,7 +69,7 @@ enum Preferences {
     }
     if !existing {
       // Persist initial scene choices so later launches do not interpret migration flags as a manual selection.
-      defaults.set(true, forKey: "liveWeather")
+      defaults.set(false, forKey: "liveWeather")
       defaults.set(WeatherEffect.none.rawValue, forKey: "weatherEffect")
     }
     let calm = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -83,7 +83,7 @@ enum Preferences {
       showInScreenshotsKey: false,
       autumnKey: false,
       "weatherEffect": (existing ? WeatherEffect.snow : .none).rawValue,
-      "liveWeather": !existing,
+      "liveWeather": false,
     ])
   }
 
@@ -95,6 +95,10 @@ enum Preferences {
   static var manualWindSpeed: Double {
     get {max(0,min(100,defaults.double(forKey:"manualWindSpeed")))}
     set {defaults.set(max(0,min(100,newValue)),forKey:"manualWindSpeed")}
+  }
+  static var manualCloudCoverage: Double {
+    get { max(0, min(100, defaults.double(forKey: "manualCloudCoverage"))) }
+    set { defaults.set(max(0, min(100, newValue)), forKey: "manualCloudCoverage") }
   }
 
   static var snowOnWindows: Bool {
@@ -115,6 +119,15 @@ enum Preferences {
   static var welcomed: Bool {
     get { defaults.bool(forKey: welcomedKey) }
     set { defaults.set(newValue, forKey: welcomedKey) }
+  }
+
+  static var fogBloom: Bool {
+    get { defaults.object(forKey: "fogBloom") == nil || defaults.bool(forKey: "fogBloom") }
+    set { defaults.set(newValue, forKey: "fogBloom") }
+  }
+  static var automaticUpdates: Bool {
+    get { defaults.bool(forKey: "automaticUpdates") }
+    set { defaults.set(newValue, forKey: "automaticUpdates") }
   }
 
   static var behindWindows: Bool {
@@ -216,11 +229,17 @@ extension Preferences {
     set { defaults.set(newValue?.rawValue, forKey: "wildlifeEffect") }
   }
   static var manualScene: WeatherScene {
-    get { WeatherScene(primary: effect, stacked: seasonalDrift, wildlife: wildlifeEffect) }
+    get {
+      var scene = WeatherScene(primary: effect, stacked: seasonalDrift, wildlife: wildlifeEffect)
+      let cover = defaults.object(forKey: "manualCloudCoverage") == nil ? effect.defaultCloudCoverage : manualCloudCoverage
+      scene.manualCloudCover = Float(cover / 100); scene.clouds = Float(cover / 100)
+      return scene
+    }
     set {
       effect = newValue.primary
       seasonalDrift = newValue.stacked
       wildlifeEffect = newValue.wildlife
+      manualCloudCoverage = newValue.manualCloudCover.map { (Double($0) * 100).rounded() } ?? newValue.primary.defaultCloudCoverage
     }
   }
 }

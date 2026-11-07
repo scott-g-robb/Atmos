@@ -43,6 +43,7 @@ struct WeatherDynamics: Equatable {
       * Float(min(120, max(weather.windSpeed, weather.windGust ?? weather.windSpeed * 1.25))) * 2.4
     turbulence = Float(min(100, weather.windSpeed)) * 0.22
     haze = max(0, (humidity - 0.78) / 0.22) * max(0, 1 - abs(temperature - feelsLike) / 20)
+    haze = max(haze, weather.visibilityFogDensity)
     evaporation = max(0.15, min(3, (1 - humidity) * 2 + max(0, feelsLike) / 35))
   }
 

@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Developer ID signing, notarization and manual release publishing. The app has no updater.
+# Developer ID signing, notarization and manual release publishing. The app updater consumes these GitHub release assets.
 set -euo pipefail
 cd "$(dirname "$0")"
 version=${1:?usage: ./release.sh <version> [notes]}

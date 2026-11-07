@@ -74,6 +74,8 @@ final class Renderer: NSObject, MTKViewDelegate {
   private let activity = FrameActivity()
   private let airflow = WindField()
   private var coverFrames: [SIMD4<Float>] = []
+  private var coverIDs: [UInt32] = []
+  var fogCaptureTime: Double?
   private var reflectionMotion: ReflectionMotion?
   private var reflectionMotionUnavailable = false
   var captureFrameRate: Int {
@@ -83,6 +85,8 @@ final class Renderer: NSObject, MTKViewDelegate {
   func desktopMoved(now: CFTimeInterval) { activity.wake(now: now) }
   var rest: () -> Void = {}
   var dockOverlay: DockOverlay?
+  var backgroundFogOverlay: DockOverlay?
+  private var backgroundDrawn = false
   var accumulatesOnWindows = true
   var simulation: SnowSimulation { current.snow.simulation }
   var weather: WeatherSimulation { current.weather.simulation }
@@ -94,14 +98,22 @@ final class Renderer: NSObject, MTKViewDelegate {
         && $0.weather.simulation.water.contains { $0.top > 0.15 && !$0.isOccluded }
     }
   }
+  var fogAmount: Float { scenes.reduce(0) { max($0, $1.weather.simulation.fogAmount) } }
+  var hasFog: Bool { fogAmount > 0.003 }
+  var fogBloomTexture: MTLTexture?
+  var fogWallpaperTexture: MTLTexture?
+  var fogBloomRect = SIMD4<Float>(0, 0, 1, 1)
+  private var fogBloom: FogBloom?
+  private var bloomUnavailable = false
   var contentTop: Float = .greatestFiniteMagnitude {
     didSet { for scene in scenes { scene.weather.contentTop = contentTop } }
   }
-  var reflectionFrame: ScreenReflection.Frame? {
+  var reflectionFrame: ScreenReflection.Frame?
+  var reflectionRect = SIMD4<Float>(0, 0, 1, 1) {
     didSet {
-      if reflectionFrame !== oldValue {
+      if reflectionRect != oldValue {
         for scene in scenes {
-          scene.weather.reflectionRect = reflectionFrame?.uvRect ?? SIMD4(0, 0, 1, 1)
+          scene.weather.reflectionRect = reflectionRect
         }
       }
     }
@@ -137,6 +149,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     current = try EffectScene(
       effect: .snow, device: device, queue: queue, format: pixelFormat, simulation: simulation)
     scenes = [current]
+    // Compile before presentation starts, so the first fog/bloom frame does
+    // not pay for Metal library/pipeline creation on the display callback.
+    do { fogBloom = try FogBloom(device: device, format: pixelFormat) }
+    catch { bloomUnavailable = true }
     super.init()
   }
 
@@ -203,7 +219,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
     next.weather.contentTop = contentTop
     next.weather.reflection = reflection
-    next.weather.reflectionRect = reflectionFrame?.uvRect ?? SIMD4(0, 0, 1, 1)
+    next.weather.reflectionRect = reflectionRect
     if let lastWindows { updateWindows(lastWindows, onWindows: accumulatesOnWindows) }
     resetClock()
   }
@@ -211,7 +227,8 @@ final class Renderer: NSObject, MTKViewDelegate {
   func setScene(_ description: WeatherScene, calm: Bool) {
     setEffect(description.primary, calm: calm)
     weather.scene = description
-    let wanted = [description.stacked, description.wildlife].compactMap { $0 }
+    let wanted = [description.stacked, description.wildlife,
+      description.fog > 0 && description.primary != .mist ? WeatherEffect.mist : nil].compactMap { $0 }
     for outgoing in overlays where !wanted.contains(outgoing.effect) {
       if outgoing.hasContent {
         outgoing.retire()
@@ -247,7 +264,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     for overlay in overlays {
       var layer = WeatherScene(primary: overlay.effect)
       layer.dynamics = description.dynamics
-      layer.strength = description.overlayStrength
+      layer.strength = overlay.effect == .mist ? description.fog : description.overlayStrength
+      layer.fog = overlay.effect == .mist ? description.fog : 0
+      layer.includesSky = false
       overlay.weather.simulation.scene = layer
       overlay.weather.simulation.density = weather.density
       overlay.weather.simulation.reducedMotion = calm
@@ -289,8 +308,9 @@ final class Renderer: NSObject, MTKViewDelegate {
       }
     }
   }
-  func setCoverFrames(_ frames: [SIMD4<Float>]) {
+  func setCoverFrames(_ frames: [SIMD4<Float>], ids: [UInt32] = []) {
     coverFrames = frames
+    coverIDs = ids
     for scene in scenes {
       scene.snow.simulation.windowFrames = frames
       scene.weather.windowOccluders = Array(frames.prefix(128))
@@ -326,6 +346,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     (view.layer as? CAMetalLayer)?.drawableSize = size
   }
   func releaseFrames(of view: MTKView) {
+    fogBloom?.reset()
     guard view.drawableSize != CGSize(width: 1, height: 1) else { return }
     Self.resize(view, to: CGSize(width: 1, height: 1))
     for scene in scenes {
@@ -350,7 +371,13 @@ final class Renderer: NSObject, MTKViewDelegate {
       command.present(drawable)
     }
     clearDock(into: command)
+    clearBackground(into: command)
     command.commit()
+  }
+  private func clearBackground(into command: MTLCommandBuffer) {
+    guard backgroundDrawn, let frame = backgroundFogOverlay?.emptyFrame(),
+      let encoder = command.makeRenderCommandEncoder(descriptor: frame.pass) else { return }
+    encoder.endEncoding(); command.present(frame.drawable); backgroundDrawn = false
   }
   private func clearDock(into command: MTLCommandBuffer) {
     guard let frame = dockOverlay?.emptyFrame(),
@@ -485,33 +512,83 @@ final class Renderer: NSObject, MTKViewDelegate {
 
   /// One shared pass draws water and atmosphere at the display's native rate.
   func encode(
-    into command: MTLCommandBuffer, pass: MTLRenderPassDescriptor, scale: Float, time: Float
+    into command: MTLCommandBuffer, pass: MTLRenderPassDescriptor, scale: Float, time: Float,
+    backgroundPass: MTLRenderPassDescriptor? = nil
   ) {
     let layers = scenes
+    // A temporarily unavailable background drawable must never reroute glow
+    // into the foreground and filter the user's desktop objects.
+    let separatesBackground = backgroundFogOverlay != nil || backgroundPass != nil
     for scene in layers { scene.weather.prepare(light: ambient.light, command: command) }
+    var scenePass = pass
+    var blooming = false
+    if hasFog, fogBloomTexture != nil, !bloomUnavailable,
+      let target = pass.colorAttachments[0].texture {
+      if fogBloom == nil {
+        do { fogBloom = try FogBloom(device: device, format: format) }
+        catch { bloomUnavailable = true }
+      }
+      if let intermediate = fogBloom?.scenePass(for: target) {
+        scenePass = intermediate
+        blooming = true
+      }
+    } else {
+      fogBloom?.reset()
+    }
     #if DEBUG
       if DebugMetrics.enabled { DebugMetrics.effectFrames += 1 }
     #endif
-    guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return }
+    guard let encoder = command.makeRenderCommandEncoder(descriptor: scenePass) else { return }
     if let target = pass.colorAttachments[0].texture {
       clip(encoder, width: target.width, height: target.height)
     }
     for scene in layers {
       scene.weather.encodeWater(with: encoder, includeGround: dockOverlay == nil)
     }
-    drawAtmosphere(layers, with: encoder, scale: scale, time: time)
+    drawAtmosphere(layers, with: encoder, scale: scale, time: time,
+      placement: separatesBackground ? .foreground : .all)
     encoder.endEncoding()
+    let hasBackground = layers.contains { $0.weather.hasBackgroundAtmosphere }
+    let backgroundFrame = hasBackground ? backgroundFogOverlay?.nextFrame(reaching: CGFloat(simulation.height)) : nil
+    let nativeBackgroundPass = backgroundPass ?? backgroundFrame?.pass
+    if let nativeBackgroundPass, let background = command.makeRenderCommandEncoder(descriptor: nativeBackgroundPass) {
+      for scene in layers { scene.weather.encodeAtmosphere(with: background, includeGround: true, placement: .nativeBackground) }
+      background.endEncoding()
+    }
+    if blooming, let fogBloom, let fogBloomTexture {
+      fogBloom.prepare(desktop: fogBloomTexture, rect: fogBloomRect,
+        size: SIMD2(simulation.width, simulation.height), windows: coverFrames, command: command,
+        wallpaper: fogWallpaperTexture, windowIDs: coverIDs, capturedAt: fogCaptureTime)
+      if let output = command.makeRenderCommandEncoder(descriptor: pass) {
+        if let target = pass.colorAttachments[0].texture {
+          clip(output, width: target.width, height: target.height)
+        }
+        fogBloom.encode(with: output, size: SIMD2(simulation.width, simulation.height),
+          amount: fogAmount, windows: coverFrames, contents: separatesBackground ? .scene : .combined)
+        output.endEncoding()
+      }
+      if let nativeBackgroundPass {
+        nativeBackgroundPass.colorAttachments[0].loadAction = .load
+        if let glow = command.makeRenderCommandEncoder(descriptor: nativeBackgroundPass) {
+          fogBloom.encode(with: glow, size: SIMD2(simulation.width, simulation.height),
+            amount: fogAmount, windows: [], contents: .light)
+          glow.endEncoding()
+        }
+      }
+    }
+    if let backgroundFrame { command.present(backgroundFrame.drawable); backgroundDrawn = true }
+    else if !hasBackground { clearBackground(into: command) }
     encodeDock(layers, into: command)
   }
   private func encodeDock(_ layers: [EffectScene], into command: MTLCommandBuffer) {
     if let dockOverlay {
       dockOverlay.setDetailedRendering(layers.contains { $0.weather.simulation.effect.hasWater })
-      let top = layers.map { max($0.weather.simulation.groundTop, $0.snow.groundTop) }.max() ?? 0
+      let top = layers.map { max(backgroundFogOverlay != nil && ($0.effect == .mist || $0.effect == .clouds) ? 0 : $0.weather.simulation.groundTop, $0.snow.groundTop) }.max() ?? 0
       if top > 0.02, let frame = dockOverlay.nextFrame(reaching: CGFloat(top + 3)),
         let ground = command.makeRenderCommandEncoder(descriptor: frame.pass)
       {
         for scene in layers {
-          scene.weather.encodeGround(with: ground, height: Float(dockOverlay.height))
+          scene.weather.encodeGround(with: ground, height: Float(dockOverlay.height), nativeFogBackground: backgroundFogOverlay != nil)
           scene.snow.encodeGround(
             with: ground, height: Float(dockOverlay.height),
             scale: Float(frame.drawable.texture.width) / max(1, simulation.width))
@@ -525,10 +602,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
   }
   private func drawAtmosphere(
-    _ layers: [EffectScene], with encoder: MTLRenderCommandEncoder, scale: Float, time: Float
+    _ layers: [EffectScene], with encoder: MTLRenderCommandEncoder, scale: Float, time: Float,
+    placement: WeatherRenderer.AtmospherePlacement = .all
   ) {
     for scene in layers {
-      scene.weather.encodeAtmosphere(with: encoder, includeGround: dockOverlay == nil)
+      scene.weather.encodeAtmosphere(with: encoder, includeGround: dockOverlay == nil, placement: placement)
       if scene.effect.usesSnowSimulation || scene.snow.simulation.hasSnow
         || scene.snow.simulation.spriteCount > 0
       {

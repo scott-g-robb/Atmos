@@ -1,362 +1,586 @@
 import AppKit
 import QuartzCore
 
-/// Shown on first launch. Getting started crumbles the window into snow that falls onto the desktop.
-final class WelcomeController: NSObject {
-  /// Receives the pieces of the window as it crumbles, in global screen coordinates.
-  var scatter: ([ScatterPiece]) -> Void = { _ in }
-  var finished: () -> Void = {}
-  /// Called instead of `scatter` when the window can't be captured and just closes.
-  var skipped: () -> Void = {}
+struct SetupPermission {
+  enum Kind: CaseIterable { case location, screen, login, automaticUpdates }
+  let kind: Kind
+  let title: String
+  let detail: String
+  let symbol: String
+  let action: String
+  let granted: Bool
+}
 
-  private var window: NSWindow?
-  private var crumble: Crumble?
+/// A versioned, optional introduction. System permission dialogs always remain
+/// in macOS's control; the guide completes only when the actual status menu opens.
+final class WelcomeController: NSObject {
+  var appIcon: NSImage?
+  var permissions: () -> [SetupPermission] = { [] }
+  var requestPermission: (SetupPermission.Kind) -> Void = { _ in }
+  var menuAnchor: () -> CGRect? = { nil }
+  var finished: (SetupProgress.Completion) -> Void = { _ in }
+  var prepareWeather: () -> Void = {}
+  private(set) var progress = SetupProgress()
+  private var window: SetupWindow?
+  private var guide: NSWindow?
+  private var permissionTimer: Timer?
+  private var anchorTimer: Timer?
+  private var observer: NSObjectProtocol?
+  private var permissionStates: [Bool] = []
+  private var awaitingPermission: SetupPermission.Kind?
+  private var transitioning = false
+  private var completed = false
+  private var calm: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+  deinit {
+    permissionTimer?.invalidate(); anchorTimer?.invalidate()
+    if let observer { NotificationCenter.default.removeObserver(observer) }
+  }
 
   func show() {
-    let size = CGSize(width: 440, height: 430)
-    let window = WelcomeWindow(
-      contentRect: CGRect(origin: .zero, size: size),
-      styleMask: .borderless,
-      backing: .buffered,
-      defer: false
-    )
+    let size = CGSize(width: 520, height: 530)
+    let window = SetupWindow(contentRect: CGRect(origin: .zero, size: size),
+      styleMask: .borderless, backing: .buffered, defer: false)
     window.isOpaque = false
     window.backgroundColor = .clear
     window.hasShadow = true
-    window.level = .floating
+    window.identifier = AtmosPanelPresentation.identifier
+    window.level = Self.frontLevel
+    window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     window.isMovableByWindowBackground = true
     window.isReleasedWhenClosed = false
-    window.onCancel = { [weak self] in self?.getStarted() }
-
-    let content = WelcomeView(frame: CGRect(origin: .zero, size: size))
-    content.button.target = self
-    content.button.action = #selector(getStarted)
-    window.contentView = content
+    window.onCancel = { [weak self] in self?.skip() }
+    window.contentView = makePage()
     window.center()
     self.window = window
-
-    NSApp.activate()
+    NSApp.activate(ignoringOtherApps: true)
+    if let page = window.contentView as? SetupPageView { page.prepareEntrance(calm: calm) }
     window.makeKeyAndOrderFront(nil)
+    observer = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification,
+      object: nil, queue: .main) { [weak self] _ in
+        guard let self, progress.page == .permissions else { return }
+        refreshPermissions()
+        window.level = Self.frontLevel
+        window.orderFrontRegardless()
+      }
   }
 
-  @objc private func getStarted() {
-    guard crumble == nil, let window, let view = window.contentView as? WelcomeView else { return }
-    view.button.isEnabled = false
-    guard let crumble = Crumble(view: view) else {
-      window.orderOut(nil)
-      skipped()
-      finished()
-      return
+  /// Called only for the root status menu, not when a settings submenu opens.
+  func menuOpened() {
+    guard progress.page == .menuBar else { return }
+    progress.openedMenu()
+    anchorTimer?.invalidate(); anchorTimer = nil
+    let guide = self.guide
+    self.guide = nil
+    finish()
+    animate(duration: 0.22, changes: { guide?.animator().alphaValue = 0 }) {
+      guide?.orderOut(nil)
     }
-    self.crumble = crumble
-    let windowOrigin = window.frame.origin
-    crumble.start { [weak self] cells in
+  }
+
+  private static let frontLevel = AtmosPanelPresentation.level
+
+  @objc private func next() {
+    guard !transitioning else { return }
+    progress.next()
+    if progress.page == .menuBar { prepareWeather(); revealMenuBar() }
+    else { changePage(forward: true) }
+  }
+  @objc private func back() {
+    guard !transitioning else { return }
+    progress.back(); changePage(forward: false)
+  }
+  @objc private func skip() {
+    guard !transitioning else { return }
+    transitioning = true
+    progress.skip()
+    animate(duration: 0.22, changes: { self.window?.animator().alphaValue = 0 }) { [weak self] in self?.finish() }
+  }
+
+  private func makePage() -> SetupPageView {
+    let view = SetupPageView(frame: CGRect(x: 0, y: 0, width: 520, height: progress.page == .permissions ? 630 : 530),
+      page: progress.page, permissions: permissions(), icon: appIcon)
+    view.next.target = self; view.next.action = #selector(next)
+    view.previous.target = self
+    view.previous.action = progress.page == .welcome ? #selector(skip) : #selector(back)
+    for (kind, button) in view.permissionButtons {
+      button.target = self; button.action = #selector(request(_:))
+      button.tag = SetupPermission.Kind.allCases.firstIndex(of: kind)!
+    }
+    permissionStates = permissions().map(\.granted)
+    return view
+  }
+
+  private func changePage(forward: Bool) {
+    guard let window, let old = window.contentView else { return }
+    window.level = Self.frontLevel
+    transitioning = true
+    permissionTimer?.invalidate(); permissionTimer = nil
+    let page = makePage()
+    let newFrame = CGRect(x: window.frame.midX-page.frame.width/2, y: window.frame.midY-page.frame.height/2,
+      width: page.frame.width, height: page.frame.height)
+    let container = NSView(frame: old.bounds)
+    container.autoresizingMask = [.width, .height]
+    let surface = AtmosPanelSurface(frame: container.bounds, welcome: false)
+    surface.autoresizingMask = [.width, .height]
+    container.addSubview(surface)
+    window.contentView = container
+    old.frame = container.bounds
+    old.autoresizingMask = [.width, .height]
+    page.frame = container.bounds
+    page.autoresizingMask = [.width, .height]
+    page.alphaValue = 0
+    container.addSubview(old); container.addSubview(page)
+    old.layoutSubtreeIfNeeded(); page.layoutSubtreeIfNeeded()
+    animate(duration: 0.25, changes: {
+      window.animator().setFrame(newFrame, display: true)
+      old.animator().alphaValue = 0
+      page.animator().alphaValue = 1
+    }) { [weak self] in
       guard let self else { return }
-      let center = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
-      self.scatter(
-        cells.map { cell in
-          let x = Float(windowOrigin.x + cell.point.x)
-          let y = Float(windowOrigin.y + cell.point.y)
-          let outward = Float((cell.point.x - center.x) / view.bounds.width)
-          return ScatterPiece(
-            position: SIMD2(x, y),
-            velocity: SIMD2(outward * 140 + .random(in: -70...70), .random(in: 30...150)),
-            color: cell.color
-          )
-        })
-      window.invalidateShadow()
-    } completion: { [weak self] in
-      window.orderOut(nil)
-      self?.crumble = nil
-      self?.window = nil
-      self?.finished()
+      page.removeFromSuperview(); page.frame = CGRect(origin: .zero, size: newFrame.size)
+      window.contentView = page
+      page.layoutSubtreeIfNeeded()
+      transitioning = false
+      if progress.page == .permissions {
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.refreshPermissions() }
+        timer.tolerance = 0.15
+        RunLoop.main.add(timer, forMode: .common)
+        permissionTimer = timer
+      }
     }
+  }
+
+  @objc private func request(_ button: NSButton) {
+    guard let kind = SetupPermission.Kind.allCases[safe: button.tag] else { return }
+    awaitingPermission = kind
+    // Let the system's authorization prompt or System Settings come forward.
+    window?.level = .normal
+    requestPermission(kind)
+    refreshPermissions()
+  }
+
+  private func refreshPermissions() {
+    guard progress.page == .permissions, let view = window?.contentView as? SetupPageView else { return }
+    let current = permissions()
+    let states = current.map(\.granted)
+    view.update(current)
+    if states != permissionStates, let awaitingPermission,
+      current.contains(where: { $0.kind == awaitingPermission && $0.granted }) {
+      self.awaitingPermission = nil
+      window?.level = Self.frontLevel
+      NSApp.activate(ignoringOtherApps: true)
+      window?.makeKeyAndOrderFront(nil)
+    }
+    permissionStates = states
+  }
+
+  private func revealMenuBar() {
+    guard let window else { return }
+    transitioning = true
+    permissionTimer?.invalidate(); permissionTimer = nil
+    let frame = window.frame
+    let top = window.screen?.frame.maxY ?? NSScreen.main?.frame.maxY ?? frame.maxY
+    animate(duration: 0.35, changes: {
+      window.animator().alphaValue = 0
+      if !self.calm { window.animator().setFrameOrigin(CGPoint(x: frame.minX, y: top + 16)) }
+    }) { [weak self] in
+      guard let self else { return }
+      window.orderOut(nil); self.window = nil; transitioning = false
+      showGuide()
+    }
+  }
+
+  private func showGuide() {
+    guard progress.page == .menuBar else { return }
+    let guide = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 210, height: 105),
+      styleMask: .borderless, backing: .buffered, defer: false)
+    guide.isOpaque = false; guide.backgroundColor = .clear
+    guide.hasShadow = false; guide.ignoresMouseEvents = true
+    guide.identifier = AtmosPanelPresentation.identifier
+    guide.level = Self.frontLevel
+    guide.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+    guide.isReleasedWhenClosed = false
+    guide.contentView = MenuBarGuideView(frame: CGRect(x: 0, y: 0, width: 210, height: 105))
+    self.guide = guide
+    placeGuide()
+    guide.alphaValue = 0; guide.orderFrontRegardless()
+    animate(duration: 0.3) { guide.animator().alphaValue = 1 }
+    if !calm, let layer = guide.contentView?.layer {
+      let float = CABasicAnimation(keyPath: "transform.translation.y")
+      float.fromValue = -2; float.toValue = 2; float.duration = 1.3
+      float.autoreverses = true; float.repeatCount = .infinity
+      float.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+      layer.add(float, forKey: "gentleGuide")
+    }
+    let timer = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in self?.placeGuide() }
+    timer.tolerance = 0.04
+    RunLoop.main.add(timer, forMode: .common)
+    anchorTimer = timer
+  }
+
+  private func placeGuide() {
+    guard let guide, let anchor = menuAnchor() else { guide?.orderOut(nil); return }
+    let screen = NSScreen.screens.first { $0.frame.intersects(anchor) }
+    let bounds = screen?.frame ?? anchor.insetBy(dx: -200, dy: -200)
+    let x = min(bounds.maxX - 214, max(bounds.minX + 4, anchor.midX - 105))
+    let y = min(anchor.minY - 109, bounds.maxY - 135)
+    let origin = CGPoint(x: x, y: y)
+    if guide.frame.origin != origin { guide.setFrameOrigin(origin) }
+    (guide.contentView as? MenuBarGuideView)?.arrowX = anchor.midX - x
+    if !guide.isVisible { guide.orderFrontRegardless() }
+  }
+
+  private func finish() {
+    guard !completed else { return }
+    completed = true
+    permissionTimer?.invalidate(); anchorTimer?.invalidate()
+    permissionTimer = nil; anchorTimer = nil
+    window?.orderOut(nil); window = nil
+    guide?.orderOut(nil); guide = nil
+    if let observer { NotificationCenter.default.removeObserver(observer); self.observer = nil }
+    if let completion = progress.completion { finished(completion) }
+  }
+
+  private func animate(duration: Double, changes: @escaping () -> Void, completion: @escaping () -> Void = {}) {
+    NSAnimationContext.runAnimationGroup({ context in
+      context.duration = calm ? min(0.15, duration) : duration
+      context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+      changes()
+    }, completionHandler: completion)
   }
 }
 
-private final class WelcomeWindow: NSWindow {
+private final class SetupWindow: NSWindow {
   var onCancel: () -> Void = {}
-
   override var canBecomeKey: Bool { true }
-
-  override func cancelOperation(_ sender: Any?) {
-    onCancel()
+  override func cancelOperation(_ sender: Any?) { onCancel() }
+  override func sendEvent(_ event: NSEvent) {
+    if event.type == .leftMouseDown { level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue - 1) }
+    super.sendEvent(event)
   }
 }
 
-/// Erases a view from the top down along a ragged, soft-edged front and hands each bit it passes,
-/// with its colour, to `pieces`, so the window seems to fall apart into the snow.
-private final class Crumble {
-  struct Cell {
-    let point: CGPoint
-    let color: SIMD3<Float>
-    let delay: Double
-  }
+/// Native controls, generous spacing and a single rounded material surface.
+final class SetupPageView: NSView {
+  let next: NSButton = AtmosPrimaryButton()
+  let previous: NSButton
+  private(set) var permissionButtons: [(SetupPermission.Kind, NSButton)] = []
+  private var permissionRows: [SetupPermission.Kind: SetupPermissionRow] = [:]
 
-  private let view: NSView
-  /// Spacing of the pieces that fly off.
-  private let cell: CGFloat = 6
-  /// Spacing of the mask: fine enough that its edge reads as a line, not as squares.
-  private let grain: CGFloat = 2
-  /// Seconds over which a spot of the mask fades out once the front reaches it.
-  private let feather = 0.05
-  private let columns: Int
-  private let rows: Int
-  /// When the front reaches each mask pixel, top row first.
-  private let front: [Double]
-  private var cells: [Cell]
-  private var next = 0
-  private var pixels: [UInt8]
-  private let mask = CALayer()
-  private var timer: Timer?
-  private var started: CFTimeInterval = 0
-  private let duration: Double
-
-  init?(view: NSView) {
-    guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
-    view.cacheDisplay(in: view.bounds, to: rep)
-    self.view = view
-    let bounds = view.bounds
-    columns = Int((bounds.width / grain).rounded(.up))
-    rows = Int((bounds.height / grain).rounded(.up))
-    pixels = Array(repeating: 255, count: columns * rows * 4)
-
-    var front = [Double](repeating: 0, count: columns * rows)
-    for row in 0..<rows {
-      for column in 0..<columns {
-        let point = CGPoint(
-          x: (CGFloat(column) + 0.5) * grain, y: bounds.height - (CGFloat(row) + 0.5) * grain)
-        front[row * columns + column] = Crumble.arrival(at: point, in: bounds)
-      }
-    }
-    self.front = front
-
-    let scale = CGFloat(rep.pixelsWide) / bounds.width
-    var cells: [Cell] = []
-    for y in stride(from: cell / 2, to: bounds.height, by: cell) {
-      for x in stride(from: cell / 2, to: bounds.width, by: cell) {
-        let point = CGPoint(x: x, y: y)
-        // Bitmap rows run top-down; the view's run bottom-up.
-        let px = min(Int(x * scale), rep.pixelsWide - 1)
-        let py = min(Int((bounds.height - y) * scale), rep.pixelsHigh - 1)
-        guard let sample = rep.colorAt(x: px, y: py)?.usingColorSpace(.sRGB),
-          sample.alphaComponent > 0.1
-        else { continue }
-        cells.append(
-          Cell(
-            point: point,
-            color: SIMD3(
-              Float(sample.redComponent), Float(sample.greenComponent), Float(sample.blueComponent)),
-            delay: Crumble.arrival(at: point, in: bounds)
-          ))
-      }
-    }
-    cells.sort { $0.delay < $1.delay }
-    self.cells = cells
-    duration = (front.max() ?? 0) + feather
-  }
-
-  func start(pieces: @escaping ([Cell]) -> Void, completion: @escaping () -> Void) {
-    view.wantsLayer = true
-    mask.frame = view.bounds
-    mask.contentsGravity = .resize
-    view.layer?.mask = mask
-    updateMask(at: 0)
-    started = CACurrentMediaTime()
-    timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
-      guard let self else {
-        timer.invalidate()
-        return
-      }
-      let elapsed = CACurrentMediaTime() - self.started
-      var batch: [Cell] = []
-      while self.next < self.cells.count, self.cells[self.next].delay <= elapsed {
-        batch.append(self.cells[self.next])
-        self.next += 1
-      }
-      self.updateMask(at: elapsed)
-      if !batch.isEmpty { pieces(batch) }
-      if elapsed >= self.duration {
-        timer.invalidate()
-        completion()
-      }
-    }
-  }
-
-  /// The front sweeps down in about half a second, held back here and there by smooth noise
-  /// and roughened by a fine grain so its edge looks like crumbling snow.
-  private static func arrival(at point: CGPoint, in bounds: CGRect) -> Double {
-    let fromTop = 1 - Double(point.y / bounds.height)
-    let x = Double(point.x)
-    let y = Double(point.y)
-    let broad = valueNoise(x / 46, y / 46) * 0.65 + valueNoise(x / 15 + 7.3, y / 15 + 2.1) * 0.35
-    return fromTop * 0.5 + broad * 0.2 + hash(Int(x * 1.7), Int(y * 1.7)) * 0.035
-  }
-
-  private func updateMask(at time: Double) {
-    for i in 0..<front.count {
-      let a = UInt8(max(0, min(1, (front[i] - time) / feather)) * 255)
-      pixels[i * 4] = a
-      pixels[i * 4 + 1] = a
-      pixels[i * 4 + 2] = a
-      pixels[i * 4 + 3] = a
-    }
-    guard let provider = CGDataProvider(data: Data(pixels) as CFData),
-      let image = CGImage(
-        width: columns,
-        height: rows,
-        bitsPerComponent: 8,
-        bitsPerPixel: 32,
-        bytesPerRow: columns * 4,
-        space: CGColorSpaceCreateDeviceRGB(),
-        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-        provider: provider,
-        decode: nil,
-        shouldInterpolate: true,
-        intent: .defaultIntent
-      )
-    else { return }
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    mask.contents = image
-    CATransaction.commit()
-  }
-
-  private static func valueNoise(_ x: Double, _ y: Double) -> Double {
-    let x0 = Int(floor(x))
-    let y0 = Int(floor(y))
-    let fx = x - floor(x)
-    let fy = y - floor(y)
-    let u = fx * fx * (3 - 2 * fx)
-    let v = fy * fy * (3 - 2 * fy)
-    let top = hash(x0, y0) + (hash(x0 + 1, y0) - hash(x0, y0)) * u
-    let bottom = hash(x0, y0 + 1) + (hash(x0 + 1, y0 + 1) - hash(x0, y0 + 1)) * u
-    return top + (bottom - top) * v
-  }
-
-  private static func hash(_ x: Int, _ y: Int) -> Double {
-    var n = UInt32(truncatingIfNeeded: x &* 374_761_393 &+ y &* 668_265_263)
-    n = (n ^ (n >> 13)) &* 1_274_126_177
-    n ^= n >> 16
-    return Double(n & 0xFFFF) / 65535
-  }
-}
-
-/// Drawn rather than built from layer properties, so `cacheDisplay` captures exactly what is on screen.
-private final class WelcomeView: NSView {
-  let button = GetStartedButton()
-  private let background = NSColor(srgbRed: 0.105, green: 0.088, blue: 0.072, alpha: 1)
-  private let ink = NSColor(srgbRed: 0.93, green: 0.9, blue: 0.85, alpha: 1)
-  private let muted = NSColor(srgbRed: 0.78, green: 0.75, blue: 0.7, alpha: 1)
-
-  override init(frame: NSRect) {
+  init(frame: CGRect, page: SetupProgress.Page, permissions: [SetupPermission], icon: NSImage? = nil) {
+    previous = NSButton(title: page == .welcome ? "Skip setup" : "Back", target: nil, action: nil)
     super.init(frame: frame)
+    wantsLayer = true
+    layer?.cornerRadius = 28
+    layer?.masksToBounds = true
+    let surface = AtmosPanelSurface(frame: bounds, welcome: page == .welcome)
+    surface.autoresizingMask = [.width, .height]
+    addSubview(surface)
 
-    // The bundled artwork, not applicationIconImage, which follows the system's tinted or clear icon style.
-    let icon = NSImageView(
-      image: Bundle.main.image(forResource: "AppIcon") ?? NSApp.applicationIconImage)
-    icon.imageScaling = .scaleProportionallyUpOrDown
-    icon.translatesAutoresizingMaskIntoConstraints = false
+    let content = NSStackView()
+    content.orientation = .vertical; content.alignment = .centerX
+    content.spacing = 14
+    content.translatesAutoresizingMaskIntoConstraints = false
+    if page == .welcome {
+      // Test runners and SwiftPM are not application bundles: never borrow their
+      // generic folder/executable icon as Atmos's identity.
+      let artwork = icon ?? Bundle.main.url(forResource: "AppIcon", withExtension: "icns")
+        .flatMap { NSImage(contentsOf: $0) } ?? Bundle.main.image(forResource: "AppIcon")
+        ?? NSImage(systemSymbolName: "cloud.sun.fill", accessibilityDescription: "Atmos")!
+      let icon = AtmosArtworkView(image: artwork)
+      icon.setAccessibilityLabel("Atmos app icon")
+      icon.translatesAutoresizingMaskIntoConstraints = false
+      NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 116),icon.heightAnchor.constraint(equalToConstant: 116)])
+      content.addArrangedSubview(icon)
+      let thanks = label("Thank you for downloading", size: 12, color: .secondaryLabelColor)
+      thanks.attributedStringValue = NSAttributedString(string: thanks.stringValue, attributes: [
+        .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.secondaryLabelColor,
+        .kern: 0.4, .paragraphStyle: Self.centered])
+      let title = label("Atmos", size: 46, weight: .medium)
+      let tagline = label("A little atmosphere on your desktop.", size: 15, color: .secondaryLabelColor)
+      content.addArrangedSubview(thanks); content.addArrangedSubview(title); content.addArrangedSubview(tagline)
+      content.setCustomSpacing(25, after: icon)
+      content.setCustomSpacing(6, after: thanks)
+      content.setCustomSpacing(9, after: title)
+    } else {
+      content.addArrangedSubview(label("Make yourself at home.", size: 27, weight: .medium))
+      content.addArrangedSubview(label("A few permissions for the full Atmos experience.\nYou can change these later in Settings.", size: 13, color: .secondaryLabelColor))
+      let rows = NSStackView(); rows.orientation = .vertical; rows.spacing = 10; rows.alignment = .leading
+      rows.translatesAutoresizingMaskIntoConstraints = false
+      for permission in permissions {
+        let row = SetupPermissionRow(permission)
+        rows.addArrangedSubview(row)
+        row.widthAnchor.constraint(equalTo: rows.widthAnchor).isActive = true
+        permissionRows[permission.kind] = row
+        permissionButtons.append((permission.kind, row.button))
+      }
+      content.addArrangedSubview(rows)
+      rows.widthAnchor.constraint(equalToConstant: 440).isActive = true
+      content.setCustomSpacing(24, after: content.arrangedSubviews[1])
+    }
+    addSubview(content)
     NSLayoutConstraint.activate([
-      icon.widthAnchor.constraint(equalToConstant: 112),
-      icon.heightAnchor.constraint(equalToConstant: 112),
+      content.centerXAnchor.constraint(equalTo: centerXAnchor),
+      content.centerYAnchor.constraint(equalTo: centerYAnchor, constant: page == .welcome ? -22 : -12),
+      content.widthAnchor.constraint(equalTo: widthAnchor, constant: -80),
     ])
-
-    let title = NSTextField(
-      labelWithAttributedString: NSAttributedString(
-        string: "IT'S SNOWING\nON YOUR DESKTOP.",
-        attributes: [
-          .font: NSFont.systemFont(ofSize: 34, weight: .light, width: .condensed),
-          .foregroundColor: ink,
-          .kern: 0.6,
-          .paragraphStyle: Self.paragraph(lineHeight: 0.95),
-        ]
-      ))
-
-    let body = NSTextField(
-      wrappingLabelWithString:
-        "A little atmosphere for your desktop. Choose a scene from the menu bar, or turn on Live Weather to follow the sky outside. Sweep snow, leaves, water and mist with your cursor."
-    )
-    body.attributedStringValue = NSAttributedString(
-      string: body.stringValue,
-      attributes: [
-        .font: NSFont.systemFont(ofSize: 13.5),
-        .foregroundColor: muted,
-        .paragraphStyle: Self.paragraph(lineHeight: 1.3),
-      ])
-    body.preferredMaxLayoutWidth = 330
-    // Selectable labels swap in a field editor on click, which re-lays the text out without its paragraph style.
-    title.isSelectable = false
-    body.isSelectable = false
-
-    let stack = NSStackView(views: [icon, title, body, button])
-    stack.orientation = .vertical
-    stack.alignment = .centerX
-    stack.spacing = 18
-    stack.setCustomSpacing(10, after: icon)
-    stack.setCustomSpacing(28, after: body)
-    stack.translatesAutoresizingMaskIntoConstraints = false
-    addSubview(stack)
+    next.keyEquivalent = "\r"
+    next.translatesAutoresizingMaskIntoConstraints = false
+    previous.isBordered = false; previous.contentTintColor = .secondaryLabelColor
+    previous.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(previous); addSubview(next)
+    let steps = SetupStepsView(frame: .zero)
+    steps.step = page == .welcome ? 0 : 1
+    steps.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(steps)
     NSLayoutConstraint.activate([
-      stack.centerXAnchor.constraint(equalTo: centerXAnchor),
-      stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-      stack.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -64),
+      previous.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 34),
+      previous.centerYAnchor.constraint(equalTo: next.centerYAnchor),
+      next.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -34),
+      next.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -28),
+      next.widthAnchor.constraint(equalToConstant: 96), next.heightAnchor.constraint(equalToConstant: 36),
+      steps.centerXAnchor.constraint(equalTo: centerXAnchor), steps.centerYAnchor.constraint(equalTo: next.centerYAnchor),
+      steps.widthAnchor.constraint(equalToConstant: 26), steps.heightAnchor.constraint(equalToConstant: 8),
     ])
+    setAccessibilityLabel(page == .welcome ? "Welcome to Atmos" : "Atmos permissions")
   }
-
   required init?(coder: NSCoder) { nil }
-
-  override var mouseDownCanMoveWindow: Bool { true }
-
-  override func draw(_ dirtyRect: NSRect) {
-    let shape = NSBezierPath(
-      roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 18, yRadius: 18)
-    background.setFill()
-    shape.fill()
-    NSColor(white: 1, alpha: 0.08).setStroke()
-    shape.lineWidth = 1
-    shape.stroke()
+  private static var centered: NSParagraphStyle {
+    let style = NSMutableParagraphStyle(); style.alignment = .center; return style
   }
-
-  private static func paragraph(lineHeight: CGFloat) -> NSParagraphStyle {
-    let style = NSMutableParagraphStyle()
-    style.alignment = .center
-    style.lineHeightMultiple = lineHeight
-    return style
+  override var mouseDownCanMoveWindow: Bool { true }
+  func update(_ permissions: [SetupPermission]) {
+    for permission in permissions { permissionRows[permission.kind]?.update(permission) }
+  }
+  func prepareEntrance(calm: Bool) {
+    guard let layer else { return }
+    if calm {
+      let fade = CABasicAnimation(keyPath: "opacity"); fade.fromValue = 0; fade.toValue = 1; fade.duration = 0.14
+      layer.add(fade, forKey: "accessibleEntrance"); return
+    }
+    layoutSubtreeIfNeeded()
+    func artwork(in view: NSView) -> NSView? {
+      for child in view.subviews { if child is AtmosArtworkView { return child }; if let found = artwork(in: child) { return found } }
+      return nil
+    }
+    let seed = artwork(in: self).map { convert($0.bounds, from: $0).insetBy(dx: -12, dy: -12) }
+      ?? CGRect(x: bounds.midX-70, y: bounds.midY-70, width: 140, height: 140)
+    let mask = CAShapeLayer(); mask.frame = bounds
+    let final = CGPath(roundedRect: bounds, cornerWidth: 28, cornerHeight: 28, transform: nil)
+    mask.path = final; mask.fillColor = NSColor.white.cgColor; layer.mask = mask
+    let unfold = CABasicAnimation(keyPath: "path")
+    unfold.fromValue = CGPath(roundedRect: seed, cornerWidth: 32, cornerHeight: 32, transform: nil)
+    unfold.toValue = final; unfold.duration = 0.68
+    unfold.timingFunction = CAMediaTimingFunction(controlPoints: 0.18, 0.72, 0.22, 1)
+    let settle = AtmosPanelPresentation.settle(layer: layer, scales: [0.965, 1.006, 1], keyTimes: [0, 0.74, 1], duration: 0.72)
+    CATransaction.begin()
+    CATransaction.setCompletionBlock { [weak layer] in layer?.mask = nil }
+    mask.add(unfold, forKey: "formingAtmosphere"); layer.add(settle, forKey: "settlingAtmosphere")
+    CATransaction.commit()
+    // The artwork leads; the words and controls arrive in a short, ordered wave.
+    let now = CACurrentMediaTime()
+    var index = 0
+    func reveal(_ view: NSView) {
+      if view is NSTextField || view === next || view === previous {
+        view.wantsLayer = true
+        let move = CABasicAnimation(keyPath: "transform.translation.y")
+        move.fromValue = -7; move.toValue = 0
+        let fade = CABasicAnimation(keyPath: "opacity"); fade.fromValue = 0; fade.toValue = 1
+        let group = CAAnimationGroup(); group.animations = [move, fade]
+        group.beginTime = now + 0.12 + Double(index)*0.045; group.duration = 0.30
+        group.fillMode = .backwards; group.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        view.layer?.add(group, forKey: "settlingContent"); index += 1
+      } else { for child in view.subviews { reveal(child) } }
+    }
+    for child in subviews where !(child is AtmosPanelSurface) { reveal(child) }
+  }
+  private func label(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular,
+    color: NSColor = .labelColor) -> NSTextField {
+    let label = NSTextField(wrappingLabelWithString: text)
+    label.font = .systemFont(ofSize: size, weight: weight)
+    label.textColor = color; label.alignment = .center
+    label.preferredMaxLayoutWidth = 440
+    label.translatesAutoresizingMaskIntoConstraints = false
+    label.widthAnchor.constraint(equalToConstant: 440).isActive = true
+    return label
   }
 }
 
-private final class GetStartedButton: NSButton {
-  private let fill = NSColor(srgbRed: 0.93, green: 0.9, blue: 0.85, alpha: 1)
-  private let label = NSColor(srgbRed: 0.09, green: 0.075, blue: 0.06, alpha: 1)
+class AtmosPanelSurface: NSView {
+  let welcome: Bool
+  let divider: Bool
+  init(frame: CGRect, welcome: Bool, divider: Bool = true) {
+    self.welcome = welcome; self.divider = divider; super.init(frame: frame)
+  }
+  required init?(coder: NSCoder) { nil }
+  var surfacePath: NSBezierPath {
+    NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 28, yRadius: 28)
+  }
+  override func draw(_ dirtyRect: NSRect) {
+    let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    let shape = surfacePath
+    let upper = dark ? NSColor(srgbRed: 0.13, green: 0.15, blue: 0.18, alpha: 1)
+      : NSColor(srgbRed: 0.99, green: 0.99, blue: 1, alpha: 1)
+    let lower = dark ? NSColor(srgbRed: 0.085, green: 0.10, blue: 0.125, alpha: 1)
+      : NSColor(srgbRed: 0.95, green: 0.965, blue: 0.985, alpha: 1)
+    NSGradient(starting: lower, ending: upper)?.draw(in: shape, angle: 90)
+    NSGraphicsContext.saveGraphicsState(); shape.addClip()
+    let strength: CGFloat = welcome ? 1 : 0.4
+    let blue = NSColor(srgbRed: 0.37, green: 0.62, blue: 0.93, alpha: (dark ? 0.16 : 0.13) * strength)
+    NSGradient(starting: blue, ending: blue.withAlphaComponent(0))?
+      .draw(in: bounds, relativeCenterPosition: CGPoint(x: -0.72, y: 0.72))
+    let sun = NSColor(srgbRed: 1, green: 0.76, blue: 0.43, alpha: (dark ? 0.10 : 0.13) * strength)
+    NSGradient(starting: sun, ending: sun.withAlphaComponent(0))?
+      .draw(in: bounds, relativeCenterPosition: CGPoint(x: 0.8, y: 0.85))
+    NSGraphicsContext.restoreGraphicsState()
+    NSColor.white.withAlphaComponent(dark ? 0.09 : 0.8).setStroke()
+    shape.lineWidth = 1; shape.stroke()
+    if divider {
+      let line = NSBezierPath();line.move(to: CGPoint(x: 34, y: 86));line.line(to: CGPoint(x: bounds.width-34, y: 86))
+      NSColor.labelColor.withAlphaComponent(dark ? 0.07 : 0.055).setStroke();line.lineWidth = 0.5;line.stroke()
+    }
+  }
+}
 
-  init() {
+private final class SetupStepsView: NSView {
+  var step = 0
+  override func draw(_ dirtyRect: NSRect) {
+    for i in 0..<2 {
+      (i == step ? NSColor.controlAccentColor : NSColor.labelColor.withAlphaComponent(0.14)).setFill()
+      NSBezierPath(ovalIn: CGRect(x: CGFloat(i)*16+2, y: 1, width: 5, height: 5)).fill()
+    }
+  }
+}
+
+final class AtmosArtworkView: NSView {
+  let image: NSImage
+  init(image: NSImage) { self.image = image; super.init(frame: .zero); setAccessibilityRole(.image) }
+  required init?(coder: NSCoder) { nil }
+  override func draw(_ dirtyRect: NSRect) {
+    NSGraphicsContext.saveGraphicsState()
+    NSBezierPath(roundedRect: bounds, xRadius: bounds.width*0.225, yRadius: bounds.height*0.225).addClip()
+    image.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1,
+      respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
+    NSGraphicsContext.restoreGraphicsState()
+  }
+}
+
+final class AtmosPrimaryButton: NSButton {
+  private var caption: NSTextField?
+  override var title: String { didSet { caption?.stringValue = title; setAccessibilityLabel(title) } }
+  init(title: String = "Next") {
     super.init(frame: .zero)
-    title = "Get Started"
+    self.title = title
     isBordered = false
-    keyEquivalent = "\r"
-    focusRingType = .none
+    setAccessibilityLabel(title)
+    let caption = NSTextField(labelWithString: title)
+    self.caption = caption
+    caption.font = .systemFont(ofSize: 13, weight: .medium)
+    caption.textColor = .white
+    caption.alignment = .center
+    caption.translatesAutoresizingMaskIntoConstraints = false
+    caption.setAccessibilityElement(false)
+    addSubview(caption)
+    NSLayoutConstraint.activate([
+      caption.centerXAnchor.constraint(equalTo: centerXAnchor),
+      caption.centerYAnchor.constraint(equalTo: centerYAnchor),
+    ])
+  }
+  required init?(coder: NSCoder) { nil }
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    bounds.contains(convert(point, from: superview)) ? self : nil
+  }
+  override func draw(_ dirtyRect: NSRect) {
+    let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 18, yRadius: 18)
+    let accent = NSColor.controlAccentColor
+    (isHighlighted ? accent.blended(withFraction: 0.14, of: .black) ?? accent : accent).setFill()
+    shape.fill()
+    if window?.firstResponder === self {
+      NSColor.keyboardFocusIndicatorColor.setStroke(); shape.lineWidth = 2; shape.stroke()
+    }
+  }
+}
+
+private final class SetupPermissionRow: NSView {
+  let button: NSButton = SetupPermissionButton(title: "Allow", target: nil, action: nil)
+  init(_ permission: SetupPermission) {
+    super.init(frame: .zero)
+    let icon = NSImageView(image: NSImage(systemSymbolName: permission.symbol, accessibilityDescription: nil) ?? NSImage())
+    icon.contentTintColor = .secondaryLabelColor
+    let title = NSTextField(labelWithString: permission.title)
+    title.font = .systemFont(ofSize: 13, weight: .semibold)
+    let detail = NSTextField(wrappingLabelWithString: permission.detail)
+    detail.font = .systemFont(ofSize: 11.5); detail.textColor = .secondaryLabelColor
+    detail.preferredMaxLayoutWidth = 262
+    let text = NSStackView(views: [title, detail])
+    text.orientation = .vertical; text.alignment = .leading; text.spacing = 4
+    button.bezelStyle = .rounded; button.controlSize = .regular
+    for view in [icon, text, button] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
     translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
-      widthAnchor.constraint(equalToConstant: 190), heightAnchor.constraint(equalToConstant: 44),
+      heightAnchor.constraint(greaterThanOrEqualToConstant: 88),
+      icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 15),
+      icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+      icon.widthAnchor.constraint(equalToConstant: 24), icon.heightAnchor.constraint(equalToConstant: 26),
+      text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 13),
+      text.centerYAnchor.constraint(equalTo: centerYAnchor),
+      text.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 12),
+      text.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -12),
+      button.leadingAnchor.constraint(equalTo: text.trailingAnchor, constant: 10),
+      button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+      button.widthAnchor.constraint(equalToConstant: 88),button.centerYAnchor.constraint(equalTo: centerYAnchor),
     ])
-    setAccessibilityLabel("Get Started")
+    update(permission)
   }
-
   required init?(coder: NSCoder) { nil }
-
   override func draw(_ dirtyRect: NSRect) {
-    let shape = NSBezierPath(roundedRect: bounds, xRadius: 2, yRadius: 2)
-    (isHighlighted ? fill.blended(withFraction: 0.12, of: .black) ?? fill : fill).setFill()
-    shape.fill()
-    let text = NSAttributedString(
-      string: "GET STARTED",
-      attributes: [
-        .font: NSFont.systemFont(ofSize: 12.5, weight: .semibold),
-        .foregroundColor: label,
-        .kern: 1.8,
-      ])
-    let size = text.size()
-    text.draw(at: CGPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2))
+    let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 14, yRadius: 14)
+    NSColor.labelColor.withAlphaComponent(0.018).setFill();shape.fill()
+    NSColor.labelColor.withAlphaComponent(0.065).setStroke();shape.lineWidth = 0.5;shape.stroke()
   }
+  func update(_ permission: SetupPermission) {
+    button.title = permission.granted ? "Allowed" : permission.action
+    button.isEnabled = !permission.granted
+    button.image = permission.granted ? NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil) : nil
+    button.imagePosition = .imageLeading
+    button.setAccessibilityLabel("\(permission.title): \(button.title)")
+  }
+}
+
+private final class SetupPermissionButton: NSButton {
+  override func draw(_ dirtyRect: NSRect) {
+    let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 2), xRadius: 12, yRadius: 12)
+    if isEnabled {
+      NSColor.controlAccentColor.withAlphaComponent(isHighlighted ? 0.16 : 0.07).setFill();shape.fill()
+      NSColor.controlAccentColor.withAlphaComponent(0.16).setStroke();shape.lineWidth = 0.5;shape.stroke()
+    }
+    let text = NSAttributedString(string: isEnabled ? title : "✓ Allowed", attributes: [
+      .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+      .foregroundColor: isEnabled ? NSColor.controlAccentColor : NSColor.secondaryLabelColor])
+    let size = text.size();text.draw(at: CGPoint(x: (bounds.width-size.width)/2, y: (bounds.height-size.height)/2))
+  }
+}
+
+final class MenuBarGuideView: NSView {
+  var arrowX: CGFloat = 105 { didSet { needsDisplay = true } }
+  override init(frame: CGRect) { super.init(frame: frame); wantsLayer = true }
+  required init?(coder: NSCoder) { nil }
+  override func draw(_ dirtyRect: NSRect) {
+    let x = min(bounds.width - 14, max(14, arrowX))
+    let path = NSBezierPath()
+    path.move(to: CGPoint(x: x, y: 46)); path.line(to: CGPoint(x: x, y: 91))
+    path.move(to: CGPoint(x: x - 7, y: 83));path.line(to: CGPoint(x: x, y: 91));path.line(to: CGPoint(x: x + 7, y: 83))
+    path.lineWidth = 3; path.lineCapStyle = .round;path.lineJoinStyle = .round
+    NSColor.controlAccentColor.setStroke(); path.stroke()
+    let pill = NSBezierPath(roundedRect: CGRect(x: 18, y: 6, width: 174, height: 32), xRadius: 16, yRadius: 16)
+    NSColor.windowBackgroundColor.setFill();pill.fill()
+    let text = NSAttributedString(string: "Your atmosphere is here", attributes: [
+      .font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.labelColor])
+    let size = text.size();text.draw(at: CGPoint(x: (bounds.width-size.width)/2, y: 22-size.height/2))
+  }
+}
+
+private extension Array {
+  subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
 }

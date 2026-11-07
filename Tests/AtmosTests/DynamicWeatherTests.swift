@@ -152,7 +152,7 @@ final class DynamicWeatherTests: XCTestCase {
   }
 
   func testBirdsLandOnWindowsAndTakeOffWhenSupportDisappears() {
-    let flock = BirdFlock()
+    let flock = BirdFlock(seed:42)
     let window = WindowSurface(
       id: 1, frame: CGRect(x: 200, y: 100, width: 500, height: 250),
       blockers: [], cornerRadius: 18, cornerExponent: 2.5, isDock: false)

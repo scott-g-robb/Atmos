@@ -10,7 +10,7 @@
 		</data>
 		<key>Resources/Assets.car</key>
 		<data>
-		GOy1iY4NfqregVBftMBUeyyw3YE=
+		3II82WtMrjX8Oa817d0WVV4x+gM=
 		</data>
 		<key>Resources/LICENSE.txt</key>
 		<data>
@@ -34,7 +34,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			V08LvkjDhtyHCSOvHLKsQXcTwwAYKe8NqNgTCmD5tWA=
+			P5Qj8tlmJml/EKSYtHu7VubZPl/23dORYLKlo1rD7Xc=
 			</data>
 		</dict>
 		<key>Resources/LICENSE.txt</key>
@@ -49,6 +49,13 @@
 			<key>hash2</key>
 			<data>
 			H92m/QnaedEXsnwBCbCL85MvnTcZJhekbg5mxh4oAdY=
+			</data>
+		</dict>
+		<key>embedded.provisionprofile</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			JREKp8IcjaxMcj9aVaQ1ZdgllfAt8LqlPU7LeGqAYRk=
 			</data>
 		</dict>
 	</dict>

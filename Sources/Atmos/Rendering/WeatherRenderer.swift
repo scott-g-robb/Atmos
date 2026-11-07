@@ -46,7 +46,9 @@ final class WeatherRenderer {
   private var pools: [(surface: WaterSurface, offset: Int)] = []
   private var uniforms = WeatherUniforms(
     viewSize: .zero, time: 0, opacity: 1, light: SIMD4(repeating: 1))
-  var contentTop: Float = .greatestFiniteMagnitude
+  var contentTop: Float = .greatestFiniteMagnitude {
+    didSet { simulation.skyCeiling = contentTop }
+  }
   var reflectionRect = SIMD4<Float>(0, 0, 1, 1)
   var reflection: MTLTexture?
   var windowOccluders: [SIMD4<Float>] = []
@@ -101,6 +103,11 @@ final class WeatherRenderer {
       region: MTLRegionMake2D(0, 0, 2, 64), mipmapLevel: 0, withBytes: &pixels, bytesPerRow: 8)
     fallback = texture
 
+  }
+
+  static func entranceOpacity(age: Double, atmospheric: Bool) -> Float {
+    let t = Float(min(1,max(0,age/(atmospheric ? 1.4:0.7))))
+    return t*t*(3-2*t)
   }
 
   func setEffect(_ effect: WeatherEffect) {
@@ -192,8 +199,9 @@ final class WeatherRenderer {
     }
     uniforms = WeatherUniforms(
       viewSize: simulation.size, time: simulation.time,
-      opacity: Float(min(1, max(0, (simulation.elapsed - startedAt) / 0.6))), light: SIMD4(light, 1)
+      opacity: Self.entranceOpacity(age: simulation.elapsed-startedAt, atmospheric: simulation.effect.hasBanks), light: SIMD4(light, 1)
     )
+    if simulation.effect == .mist { uniforms.opacity *= simulation.fogAmount }
     uniforms.cursor = simulation.interaction
     uniforms.screen = SIMD4(
       simulation.size.x, simulation.size.y, min(contentTop, simulation.size.y), 0)
@@ -237,12 +245,41 @@ final class WeatherRenderer {
     }
   }
 
-  func encodeAtmosphere(with encoder: MTLRenderCommandEncoder, includeGround: Bool) {
+  enum AtmospherePlacement { case all, foreground, nativeBackground }
+  private func isNativeAtmosphere(_ p: WeatherParticle) -> Bool {
+    // All mist belongs behind native desktop objects, including its wisps.
+    // Cloud wisps retain their existing foreground/background distribution.
+    simulation.effect == .mist || p.motion.w == 15 || p.motion.w == 12 || p.motion.w == 7
+      || (p.motion.w == 2 && p.life.z > 0.5)
+  }
+  var hasBackgroundAtmosphere: Bool {
+    simulation.decorations.contains(where: isNativeAtmosphere)
+      || ((simulation.effect == .mist || simulation.effect == .clouds) && simulation.particles.contains(where: isNativeAtmosphere))
+  }
+  func encodeAtmosphere(with encoder: MTLRenderCommandEncoder, includeGround: Bool,
+    placement: AtmospherePlacement = .all) {
     guard frames.count == 2 else { return }
     bindSmoke(encoder)
-    // Beams and banks sit behind the particles. Window banks carry their foreground occlusion masks.
-    drawDecorations(encoder: encoder, uniforms: uniforms, ground: includeGround ? nil : false)
-    drawSprites(encoder: encoder, uniforms: uniforms, start: 0, count: simulation.particleCount)
+    drawDecorations(encoder: encoder, uniforms: uniforms, ground: includeGround ? nil : false, placement: placement)
+    let volumes = simulation.effect == .mist || simulation.effect == .clouds
+    if placement == .nativeBackground && !volumes { return }
+    if placement == .all || !volumes {
+      drawSprites(encoder: encoder, uniforms: uniforms, start: 0, count: simulation.particleCount)
+      return
+    }
+    // Batch cloud ranges without copying particle storage or uploading a
+    // second simulation buffer; mist goes entirely to the native background.
+    var start: Int?
+    for i in 0...simulation.particleCount {
+      let include = i < simulation.particleCount
+        && (isNativeAtmosphere(simulation.particles[i]) == (placement == .nativeBackground))
+      if include && start == nil { start = i }
+      if !include, let first = start {
+        drawSprites(encoder: encoder, uniforms: uniforms, start: first, count: i-first,
+          nativeOcclusion: placement == .nativeBackground)
+        start = nil
+      }
+    }
   }
 
   private func bindSmoke(_ encoder: MTLRenderCommandEncoder) {
@@ -264,7 +301,7 @@ final class WeatherRenderer {
     }
   }
 
-  func encodeGround(with encoder: MTLRenderCommandEncoder, height: Float) {
+  func encodeGround(with encoder: MTLRenderCommandEncoder, height: Float, nativeFogBackground: Bool = false) {
     guard frames.count == 2 else { return }
     var u = uniforms
     u.viewSize.y = height
@@ -272,7 +309,7 @@ final class WeatherRenderer {
     for (pool, offset) in pools where pool.belowDock {
       drawPool(pool, offset: offset, encoder: encoder, uniforms: u)
     }
-    drawDecorations(encoder: encoder, uniforms: u, ground: true)
+    drawDecorations(encoder: encoder, uniforms: u, ground: true, placement: nativeFogBackground ? .foreground : .all)
   }
 
   private func drawPool(
@@ -301,14 +338,16 @@ final class WeatherRenderer {
   }
 
   private func drawDecorations(
-    encoder: MTLRenderCommandEncoder, uniforms: WeatherUniforms, ground: Bool?
+    encoder: MTLRenderCommandEncoder, uniforms: WeatherUniforms, ground: Bool?,
+    placement: AtmospherePlacement = .all
   ) {
     for (i, sprite) in simulation.decorations.enumerated() {
+      if placement != .all && isNativeAtmosphere(sprite) != (placement == .nativeBackground) { continue }
       let isGround = sprite.motion.w == 7 && sprite.life.z == 0
       if let ground, ground != isGround { continue }
       var u = uniforms
       var blockers = [SIMD4<Float>.zero]
-      if sprite.motion.w == 7,
+      if placement != .nativeBackground, sprite.motion.w == 7,
         let bank = simulation.banks.first(where: { Float($0.id) == sprite.life.z })
       {
         u.details.z = Float(min(128, bank.blockers.count))
@@ -320,19 +359,20 @@ final class WeatherRenderer {
         &blockers, length: blockers.count * MemoryLayout<SIMD4<Float>>.stride, index: 3)
       drawSprites(
         encoder: encoder, uniforms: u, start: simulation.particleCount + i, count: 1,
-        clearBlockers: false)
+        clearBlockers: false, nativeOcclusion: placement == .nativeBackground)
     }
   }
 
   private func drawSprites(
     encoder: MTLRenderCommandEncoder, uniforms: WeatherUniforms, start: Int, count: Int,
-    clearBlockers: Bool = true
+    clearBlockers: Bool = true, nativeOcclusion: Bool = false
   ) {
     guard count > 0 else { return }
     var u = uniforms
-    u.screen.w = Float(windowOccluders.count)
-    if let dynamics = simulation.dynamics {
-      u.climate = SIMD4(dynamics.cloudCover, dynamics.haze, simulation.wind, 1)
+    u.screen.w = nativeOcclusion ? 0 : Float(windowOccluders.count)
+    if simulation.dynamics != nil || simulation.scene.manualCloudCover != nil {
+      u.climate = SIMD4(simulation.sky.threshold, simulation.dynamics?.haze ?? 0, simulation.wind, 1)
+      u.details.w = simulation.sky.maskPhase
     }
     encoder.setFragmentTexture(reflection ?? fallback, index: 0)
     encoder.setRenderPipelineState(particles)

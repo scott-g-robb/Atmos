@@ -10,6 +10,7 @@
   <a href="#build">Build from source</a>
 </p>
 <p align="center">macOS 14+ · Apple silicon &amp; Intel · Free for noncommercial use</p>
+<p align="center">Current build: <strong>0.14.1 (65)</strong> · <a href="CHANGELOG.md">What's changed since 0.13.2</a></p>
 
 ![Snow, rain, storm clouds, mist, fireflies and autumn leaves rendered by Atmos](docs/assets/scenes.png)
 
@@ -35,22 +36,73 @@ the app targets your display's native refresh rate, including 120 Hz ProMotion.*
 | Lightning · Sleet · Hail | Dandelions · Rose Petals | Butterflies |
 | Mist · Cloud Wisps · Sunbeams | Maple Seeds · Cottonwood Fluff | Fireflies |
 
-Live Weather is on for new installs, with no manual layers preselected.
-Choose one item in each section of **Manual Scene**. Click a selected item again to
+New installs start with Live Weather off and no manual layers selected.
+Effects and screen capture stay paused throughout setup, including its menu-bar guide.
+If Location is allowed, pressing Next on Permissions starts preparing weather immediately.
+Opening the menu-bar icon activates that reading, or continues the same request if it
+is still loading. Skip Setup restores an existing user’s selections; a new install stays empty.
+Finishing setup enables Live Weather only if Location is allowed.
+Choose one item in each section of **Manual Effects**. Click a selected item again to
 turn that layer off; weather, drifting material and wildlife work independently.
 Petals and seeds share the original leaves' tumbling, cursor interaction, window
 accumulation and motion blur. Whole dandelion seed heads burst into windborne seeds
 with a soft poof when you sweep through them. Maple seeds autorotate around the stem in individually tilted horizontal planes.
 Maple seeds decay naturally and accumulate more lightly than autumn leaves.
 Birds arrive in groups of 2–5, usually alone with an occasional second flock and long
-quiet gaps. They sometimes rest on window tops; gentle drags carry them, while a shake
-makes them fly away.
+quiet gaps. Some groups pass by; others choose one or several spaced window perches,
+with varied resting times and mostly related species. Gentle drags carry resting birds,
+while a shake makes them fly away.
 
 **Live Weather** continuously shapes cloud cover, rain density and drop motion from
 local measurements, with shared gusts and shelter behind windows. Humidity affects
 cloud density and evaporation; feels-like temperature affects snow thawing and wildlife.
 Rainfall is normalized to mm/h for both providers. Individual drop fall speed is inferred
 from rainfall intensity, since weather providers do not measure it.
+
+Cloud cover controls the occupied width across the top of the visible desktop, below
+the menu bar. The original soft cloud volumes, lighting and wispy undersides are
+preserved. A shared coverage field creates gaps and starts precipitation at the screen top
+within covered columns, so it reaches windows near the top of the desktop;
+wind then carries the falling drops. Cloud depth and darkness respond continuously
+to the rain rate. Clear Scene dissipates the sky and lets it form again gradually.
+
+Mist has a continuous low-lying haze, broad rolling banks and diffuse light scattering
+that softens the desktop's contrast. All mist stays behind application windows,
+widgets, desktop icons and the Dock, preserving their normal appearance.
+Reported visibility adds a restrained haze even when the main condition is partly
+cloudy. Visibility from Apple Weather and Open-Meteo is normalized to metres; the
+visual density increases gradually as visibility falls. Fog warnings can strengthen
+the same layer. This is an artistic display mapping, not a measured fog simulation.
+Light haze retains the observed clouds and softened sunbeams; denser fog reduces
+wildlife and drifting accents so the desktop stays calm. Visibility is shown in Local
+weather details, and reported cloud measurements stay intact.
+
+**Fog Bloom** scatters window-edge, widget, Dock and desktop-icon colours into soft
+halos. A clean wallpaper reference separates those objects from the background so
+wallpaper detail does not become a competing light source. Dense fog and window
+lighting sit behind real windows: macOS clips them to the actual window shape during
+minimization, including the curved Genie animation. Widget and icon halos are subtle
+and also sit behind the real objects, with no foreground filter or inverted wallpaper
+mask. Window-edge colours are cached on the GPU and follow the current window geometry
+at display refresh, avoiding delayed-capture flicker. A soft contact halo bridges the
+window shadow. Atmos's welcome and update panels stay
+clear and above all effects. Bloom uses Screen Recording while fog is visible,
+shares the live capture stream with water, and can be disabled separately in Settings.
+
+Available Apple Weather warnings appear above the current conditions with the issuing
+agency's original text and a details link. Active fog warnings add fog while retaining
+observed cloud cover and precipitation; future and expired warnings do not drive the
+scene. Apple observations and warnings refresh about every five minutes while active.
+Failed location or weather requests retry after 1, 2, 3, 5, 15 and then 30 seconds,
+turning Live Weather off after 15 failed attempts. No temporary weather scene is
+selected. Success or an explicit refresh resets the retry budget.
+Location acquisition, retries and timeouts keep working while the menu is open;
+the weather card updates as soon as data arrives. Apple gets two bounded attempts,
+one second apart, before the labelled Open-Meteo fallback. If neither provider works,
+the retry schedule above applies. Cancelled requests cannot replace a newer reading.
+Warning availability depends on WeatherKit and the location. Open-Meteo uses the same
+cloud and rain system, but its [forecast API](https://open-meteo.com/en/docs) does not
+provide official warnings; the menu labels warning data as unavailable.
 
 Seasonal Drift and Wildlife arrive in short spells with quiet intervals, according to
 season, hemisphere, wind, rain, warmth and daylight. Windy autumn days can carry leaves
@@ -71,29 +123,65 @@ sweeping through one releases its individual seeds in a soft burst.
 
 1. Download the Mac installer from [grobb.dev](https://grobb.dev/projects/atmos) or [GitHub Releases](https://github.com/scott-g-robb/Atmos/releases).
 2. Open the `.dmg` and drag **Atmos** into **Applications**.
-3. Open Atmos and use its icon in the menu bar.
+3. Open Atmos. A short welcome appears for each manually installed copy, including a
+   replacement with the same version/build. Only a verified silent automatic relaunch
+   bypasses it.
+   The panel forms outward from the Atmos icon, followed by the text and controls.
+   Choose **Next** to review permissions, or **Skip setup** to restore your previous
+   choices. New installs remain empty when setup is skipped.
+4. The final screen leads to an arrow below Atmos's menu-bar icon. Open the icon to
+   finish setup; the arrow fades away. **Settings → Show Setup…** reopens the guide.
+
+<p align="center"><img src="docs/assets/welcome.png" width="400" alt="Atmos welcome, with the app's weather icon, soft ambient light and optional setup"></p>
 
 The installer contains just Atmos and the Applications shortcut, with a drag-to-install
 arrow. Quit an older copy before replacing it. To uninstall, quit Atmos and move it
 to the Trash.
 
-The included development installer is signed but **not notarized**. If macOS blocks
+The included installer is Developer ID signed but **not notarized**. If macOS blocks
 it, use **System Settings → Privacy & Security → Open Anyway**. See
 [RELEASING.md](RELEASING.md) for Developer ID signing and notarization.
 
 ## Make it yours
 
-Combine manual layers or switch **Live Weather** on. Use the intensity slider for
-manual scenes; live intensity is automatic. **Wind Speed**, directly below intensity,
-sets manual wind from 0–100 km/h and remembers the setting. Live Weather controls wind
-automatically. Both modes use shared gusts and shelter behind windows. **Surfaces** controls accumulation,
-evaporation and window interaction. **Settings** includes placement, screenshot
-visibility, full-screen behaviour and Open at Login.
+Atmos's custom dropdown shares the welcome and update screens' soft lighting,
+rounded surface and light/dark appearance. A small integrated pointer follows the
+menu-bar icon; the panel stays narrow and compact, with no continuous UI animation.
+**Live weather** keeps the overview simple. Click the weather card for conditions,
+warnings, source selection and Refresh Weather. **My atmosphere** shows saved presets
+for one-click switching. Each preset's arrow reveals **Edit** and **Delete**. With no
+presets, it opens the editor directly. **New atmosphere** starts with no effects,
+4 km/h wind, Medium intensity and 0% cloud coverage. Names default to `atmos1`,
+`atmos2`, etc. and remain editable at the top.
+
+The editor has four tabs: **Weather**, **Drift**, **Wildlife** and **Advanced**.
+Advanced holds intensity, wind and cloud coverage. Selecting weather suggests a
+suitable cloud coverage, which you can then adjust. Select an active tile again to
+remove that layer. **Save** stays at the bottom right and stores all three layers
+and advanced settings. A preset's icon follows Weather, then Drift, then Wildlife.
+Empty atmospheres cannot be saved. Presets stay on this Mac.
+**Settings** holds the full surface, reflection, placement, screenshot, full-screen
+and login controls. Manual sliders stay out of Live Weather.
+**Check for Updates** stays in a separate footer beside Quit. Clicking outside closes
+the dropdown; Escape and keyboard focus remain available. A native loading indicator
+appears while Live Weather waits for its first reading; the result eases smoothly
+into place inside the fixed dropdown frame. Apple Weather attribution is
+scaled consistently and appears once per weather view.
+
+The rounded welcome and permissions screens use native controls, light/dark
+appearance and smooth, centred transitions, with reduced-motion alternatives.
+Effects return gently after Skip or setup completion, including previously formed clouds. Location
+supports Live Weather; Screen Recording supports desktop reflections and fog bloom;
+Open at Login and Automatic Updates are optional. Permissions are requested only when you choose to allow
+them or explicitly enable a feature that needs them. Missing permissions never block
+the **Next** button.
 
 **Settings → Permissions & Activity** shows granted access and current use for
 Screen Recording, Location Services and Open at Login, with links to macOS settings.
 **Settings → Screen Reflections** stops or enables desktop capture without revoking
-the macOS permission. **Settings → Water Reflection Source** offers:
+the macOS permission for water; **Fog Bloom** controls capture for fog independently.
+Capture stops when neither visible water nor fog bloom needs it.
+**Settings → Water Reflection Source** offers:
 
 | Source | What appears in the water |
 | --- | --- |
@@ -121,16 +209,47 @@ Fresh window releases share the available sample budget so a full particle pool 
 not defer the visible splash. Slow cursor hovering does not generate foam. Airborne droplets use the same reflection
 source as puddles; they do not independently start screen capture.
 
+## Updates
+
+**Check for Updates…** in the menu bar checks the latest full release at
+[scott-g-robb/Atmos](https://github.com/scott-g-robb/Atmos/releases). Releases are
+identified by their **Atmos X.X.X** names. If newer, Atmos asks before downloading,
+verifying and staging it. All running copies then close before the installed app is
+replaced and reopened in the same location. If no
+newer version exists, it says **Atmos is up to date**. The prompt and progress panel
+share the welcome screens’ design.
+
+**Automatic Updates** is an optional setup choice and Settings toggle. When enabled,
+Atmos checks about every two hours while running and awake. Automatic downloads,
+installation and background relaunch are silent. Only that relaunch skips welcome;
+a later manual installation always presents setup again.
+Update checks stay paused during setup. Automatic installation never opens an administrator
+prompt; locations requiring approval wait for a manual update. Manual updates can
+request macOS authorization when needed.
+
+Updates verify the release SHA-256 digest, matching bundle/version, CPU architecture
+and the existing Apple signing team before replacement. A short-lived helper stages
+the new app first, waits for Atmos to close, replaces it atomically and reopens it.
+Failed replacement restores the previous copy. There is no persistent update helper.
+
 ## Privacy & weather sources
 
-- **Location Services** is requested when Live Weather first starts. A more accurate fix and neighbourhood-first place names improve local labels. Weather coordinates are rounded to roughly a kilometre; reverse geocoding uses coordinates rounded to roughly 100 metres. Location and weather readings remain in memory.
-- **Screen Recording** is needed for desktop and window reflections. Images stay on your Mac, are never saved or uploaded, and contain no audio. macOS **Stop Sharing** is respected.
-- **Automatic · Apple First** tries Apple on every request and clearly labels the Open-Meteo fallback. Transient fallback retries Apple after 30 seconds, backing off to five minutes. Attribution-image failures never discard a successful weather reading. You can also select either provider manually.
+- **Location Services** is requested through setup or an explicit Live Weather/Refresh action. A more accurate fix and neighbourhood-first place names improve local labels. Weather coordinates are rounded to roughly a kilometre; reverse geocoding uses coordinates rounded to roughly 100 metres. Location and weather readings remain in memory.
+- **Screen Recording** is needed for desktop/window reflections and colour-aware fog bloom. Images stay on your Mac, are never saved or uploaded, and contain no audio. Atmos excludes its own windows from capture to avoid feedback. macOS controls the recording indicator; **Stop Sharing** is respected until an explicit capture choice resumes it.
+- **Automatic · Apple First** tries Apple on every request, retries it once after a second, then clearly labels any Open-Meteo fallback. Transient fallback checks Apple again after 30 seconds, backing off to five minutes. Selecting Apple also permits this labelled fallback after its retry; selecting Open-Meteo requests only that provider. Attribution-image failures never discard a successful weather reading.
 
-Apple Weather needs a WeatherKit-enabled signed build or personal credentials stored
-in Keychain. A source build works with Open-Meteo without an API key. Atmos uses the
+The distributed app uses native WeatherKit authorization for all Macs; users do not
+need personal keys or a developer account. Source builds need a matching WeatherKit
+profile/signing identity, or optional personal credentials in Keychain. Open-Meteo
+works without an API key. Atmos uses the
 supported Apple weather service; it does not read the Weather app's private files.
 See [weather setup](RELEASING.md#apple-weather).
+
+If Screen Recording looks enabled in macOS but unavailable in Atmos, use
+**Settings → Permissions & Activity → Recheck Screen Recording**. This explicitly
+verifies access with ScreenCaptureKit without starting a capture stream. macOS can
+require a fresh grant or relaunch after a signing-identity change; **Restart Atmos…**
+is available beside Recheck. Stop Sharing remains respected.
 
 ## Built for macOS
 
@@ -155,6 +274,7 @@ Requires Xcode, its command-line tools, and [Rust](https://rustup.rs/).
 ./test.sh             # Rust, Swift and Metal regression tests
 ./build.sh            # Universal build/Atmos.app
 ./make-installer.sh   # Verified dist/Atmos-<version>.dmg
+./scripts/package-source.sh # Source ZIP without build products or credentials
 ./install.command     # Build, install into ~/Applications and launch
 ```
 

@@ -16,6 +16,15 @@ final class WindowReflectionTests: XCTestCase {
     reflection.invalidate()
     reflection.stop()
     XCTAssertTrue(reflection.stoppedByUser, "Pausing or changing Spaces must not undo Stop Sharing")
+    reflection.fogBloomEnabled = true
+    XCTAssertFalse(reflection.stoppedByUser, "Explicitly enabling fog bloom permits capture")
+    reflection.captureStopped(
+      with: NSError(domain: SCStreamErrorDomain, code: SCStreamError.userStopped.rawValue))
+    reflection.fogBloomEnabled = true
+    XCTAssertTrue(reflection.stoppedByUser, "An unchanged fog setting must not undo Stop Sharing")
+    reflection.fogBloomEnabled = false
+    reflection.fogBloomEnabled = true
+    XCTAssertFalse(reflection.stoppedByUser)
     reflection.enabled = true
     XCTAssertFalse(
       reflection.stoppedByUser, "Selecting a reflection source explicitly allows capture again")

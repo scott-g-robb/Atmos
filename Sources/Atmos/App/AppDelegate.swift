@@ -16,7 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private let snowfallSlider = SnowfallSlider()
   private let windSlider = WindSlider()
   private var windHeader: NSMenuItem!
-  private var effectiveWind: Float { Preferences.liveWeather ? weather.current?.horizontalWind ?? 0 : Float(Preferences.manualWindSpeed)*2.4 }
+  private var manualControlItems: [NSMenuItem] = []
+  private var effectiveWind: Float { setupPending ? 0 : Preferences.liveWeather ? weather.current?.horizontalWind ?? 0 : Float(Preferences.manualWindSpeed)*2.4 }
   private var accumulateItem: NSMenuItem!
   private var meltItem: NSMenuItem!
   private var snowOnWindowsItem: NSMenuItem!
@@ -42,6 +43,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var screenshotsItem: NSMenuItem!
   private var loginItem: NSMenuItem!
   private var screenReflectionsToggle: NSMenuItem!
+  private var fogBloomItem: NSMenuItem!
+  private var fogPermissionItem: NSMenuItem!
+  private let updater = AppUpdater()
+  private var updateItem: NSMenuItem!
+  private var automaticUpdateItem: NSMenuItem!
+  private var setupPending = false
+  private var setupWeatherPreparing = false
+  private var statusMenu: NSMenu?
+  private var customMenu: AtmosMenuController?
   private var screenPermissionItem: NSMenuItem!
   private var locationPermissionItem: NSMenuItem!
   private var loginPermissionItem: NSMenuItem!
@@ -53,17 +63,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var welcome: WelcomeController?
   private let power = PowerMonitor()
   private var liveSceneTimer: Timer?
-  private let weather = LiveWeather()
+  private let weather: LiveWeather
+
+  override convenience init() { self.init(weather: LiveWeather()) }
+  init(weather: LiveWeather) {
+    self.weather = weather
+    super.init()
+    weather.changed = { [weak self] in self?.applyWeather() }
+    weather.failureLimitReached = { Preferences.liveWeather = false }
+    ScreenRecordingAccess.shared.changed = { [weak self] in
+      guard let self else { return }
+      if ScreenRecordingAccess.shared.isGranted { screens.forEach { $0.refreshCapturePermission() } }
+      if statusItem != nil { refreshCustomMenu() }
+    }
+  }
   private var scene: WeatherScene {
-    weather.current.map { WeatherScene(weather: $0) }
-      ?? Preferences.manualScene
+    if setupPending { return WeatherScene(primary: .none) }
+    if Preferences.liveWeather {
+      return weather.current.map { WeatherScene(weather: $0) } ?? WeatherScene(primary: .none)
+    }
+    return Preferences.manualScene
   }
   private var effect: WeatherEffect { scene.primary }
   private var statusEffect: WeatherEffect {
     effect == .none ? scene.stacked ?? scene.wildlife ?? .none : effect
   }
   private var effectiveIntensity: Snowfall {
-    Preferences.liveWeather ? weather.current?.intensity ?? .light : snowfall
+    setupPending ? .off : Preferences.liveWeather ? weather.current?.intensity ?? .light : snowfall
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
@@ -75,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       DebugMetrics.start()
     #endif
     Preferences.registerDefaults()
+    _ = SetupProgress.consumeAutomaticRelaunch()
     guard let device = MTLCreateSystemDefaultDevice() else {
       NSApp.terminate(nil)
       return
@@ -85,7 +112,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     thaws = Preferences.meltSnow
     snowOnWindows = Preferences.snowOnWindows
     behindWindows = Preferences.behindWindows
-    snowfallHeld = !Preferences.welcomed
+    setupPending = SetupProgress.needsPresentation()
+    snowfallHeld = false
     syncScreens()
     guard !screens.isEmpty else {
       NSApp.terminate(nil)
@@ -93,8 +121,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     makeStatusItem()
-    weather.changed = { [weak self] in self?.applyWeather() }
-    weather.setEnabled(Preferences.liveWeather)
+    installCustomMenu()
+    weather.requestsLocationAuthorization = weather.locationAuthorization != .notDetermined
+    weather.setEnabled(!setupPending && Preferences.liveWeather)
     updateStatusIcon()
     updateActivity()
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
@@ -105,8 +134,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // commit. Recheck after installing observers so a missed initial event
     // cannot leave a visible scene paused at launch.
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.updateActivity() }
-    if snowfallHeld {
-      DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in self?.showWelcome() }
+    if setupPending {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.showWelcome() }
     }
   }
 
@@ -143,28 +172,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     for snow in screens { snow.simulation.snowfallHeld = false }
   }
 
-  private func showWelcome() {
+  @objc private func showWelcome() {
+    guard welcome == nil else { return }
+    setupPending = true
+    setupWeatherPreparing = false
+    updateActivity()
+    applyWeather()
     let welcome = WelcomeController()
-    welcome.scatter = { [weak self] pieces in
-      guard let self, let first = pieces.first else { return }
-      let point = CGPoint(x: CGFloat(first.position.x), y: CGFloat(first.position.y))
-      guard let snow = screens.first(where: { $0.window.frame.contains(point) }) ?? screens.first
-      else { return }
-      let origin = SIMD2(Float(snow.window.frame.minX), Float(snow.window.frame.minY))
-      snow.simulation.scatter(
-        pieces.map { piece in
-          var local = piece
-          local.position -= origin
-          return local
-        })
+    welcome.permissions = { [weak self] in self?.setupPermissions() ?? [] }
+    welcome.requestPermission = { [weak self] kind in self?.requestSetupPermission(kind) }
+    welcome.menuAnchor = { [weak self] in
+      guard let button = self?.statusItem.button, let window = button.window else { return nil }
+      return window.convertToScreen(button.convert(button.bounds, to: nil))
     }
-    welcome.skipped = { [weak self] in self?.releaseSnowfall() }
-    welcome.finished = { [weak self] in
-      Preferences.welcomed = true
-      self?.welcome = nil
-    }
+    welcome.prepareWeather = { [weak self] in self?.prepareSetupWeather() }
+    welcome.finished = { [weak self] completion in self?.finishSetup(completion) }
     self.welcome = welcome
     welcome.show()
+  }
+
+  func prepareSetupWeather() {
+    guard setupPending else { return }
+    let authorization = weather.locationAuthorization
+    guard authorization == .authorized || authorization == .authorizedAlways else { return }
+    setupWeatherPreparing = true
+    updateActivity()
+    weather.setEnabled(true)
+  }
+
+  func finishSetup(_ completion: SetupProgress.Completion) {
+    SetupProgress.complete()
+    Preferences.welcomed = true
+    let authorization = weather.locationAuthorization
+    Preferences.liveWeather = SetupProgress.liveWeather(after: completion, previous: Preferences.liveWeather,
+      locationGranted: authorization == .authorized || authorization == .authorizedAlways)
+    screens.forEach { $0.resumeAfterSetup() }
+    setupPending = false
+    setupWeatherPreparing = false
+    welcome = nil
+    // A prepared or in-flight request is preserved. The menu click activates
+    // its data; it must not cancel it and start location lookup again.
+    weather.setEnabled(Preferences.liveWeather)
+    applyWeather()
+    releaseSnowfall()
+    updateActivity()
+  }
+
+  private func setupPermissions() -> [SetupPermission] {
+    let location = weather.locationAuthorization
+    let login = SMAppService.mainApp.status
+    return [
+      SetupPermission(kind: .location, title: "Location", detail: "Follow the weather where you are, automatically.",
+        symbol: "location", action: location == .notDetermined ? "Allow" : "Settings…",
+        granted: location == .authorized || location == .authorizedAlways),
+      SetupPermission(kind: .screen, title: "Screen Recording",
+        detail: "Desktop reflections and colour-matched fog bloom. Images stay on this Mac; no audio.",
+        symbol: "rectangle.on.rectangle", action: "Allow", granted: ScreenRecordingAccess.shared.isGranted),
+      SetupPermission(kind: .login, title: "Open at Login · Optional",
+        detail: "A little atmosphere, ready whenever you sign in.", symbol: "arrow.right.circle",
+        action: login == .requiresApproval ? "Settings…" : "Enable", granted: login == .enabled),
+      SetupPermission(kind: .automaticUpdates, title: "Automatic Updates · Optional",
+        detail: "Quietly check, install and reopen Atmos in the background. No update windows.",
+        symbol: "arrow.triangle.2.circlepath", action: "Enable", granted: Preferences.automaticUpdates),
+    ]
+  }
+
+  private func requestSetupPermission(_ kind: SetupPermission.Kind) {
+    switch kind {
+    case .location:
+      if weather.locationAuthorization == .notDetermined {
+        weather.requestLocationAccess()
+      } else { openLocationSettings() }
+    case .screen:
+      if !ScreenRecordingAccess.shared.isGranted && !CGRequestScreenCaptureAccess() { openScreenRecordingSettings() }
+      else { ScreenRecordingAccess.shared.recheck() }
+      screens.forEach { $0.setReflections(Preferences.screenReflections); $0.setFogBloom(Preferences.fogBloom) }
+    case .login:
+      if SMAppService.mainApp.status == .requiresApproval { openLoginSettings() }
+      else {
+        do { try SMAppService.mainApp.register() }
+        catch { openLoginSettings() }
+      }
+    case .automaticUpdates:
+      Preferences.automaticUpdates = true
+      updateActivity()
+    }
   }
 
   // MARK: - Menu
@@ -173,8 +265,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   func makeStatusItem() -> NSStatusItem {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     statusItem = item
-    item.button?.image = NSImage(
-      systemSymbolName: statusEffect.symbol, accessibilityDescription: "Atmos")
+    item.button?.image = EffectArtwork.statusImage(for: statusEffect)
+    item.button?.setAccessibilityLabel("Atmos")
 
     let menu = NSMenu()
     menu.delegate = self
@@ -202,12 +294,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       for effect in effects {
         let option = add(effect.title, #selector(chooseMode), to: modes)
         option.representedObject = effect.rawValue
-        option.image = NSImage(systemSymbolName: effect.symbol, accessibilityDescription: nil)
+        option.image = EffectArtwork.image(for: effect)
         effectItems[effect] = option
       }
     }
-    sceneItem = menu.addItem(withTitle: "Scene", action: nil, keyEquivalent: "")
+    sceneItem = menu.addItem(withTitle: "Manual Effects", action: nil, keyEquivalent: "")
     sceneItem.submenu = modes
+    sceneItem.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: nil)
     let details = NSMenu()
     details.autoenablesItems = false
     details.delegate = self
@@ -233,30 +326,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     weatherDetailsItem = menu.addItem(withTitle: "Local Weather", action: nil, keyEquivalent: "")
     weatherDetailsItem.image = NSImage(systemSymbolName: "cloud.sun", accessibilityDescription: nil)
     weatherDetailsItem.submenu = details
-    menu.addItem(.separator())
+    modes.addItem(.separator())
     intensityHeader = .sectionHeader(title: "Intensity")
-    menu.addItem(intensityHeader)
+    modes.addItem(intensityHeader)
+    manualControlItems.append(intensityHeader)
     snowfallSlider.changed = { [unowned self] in select($0) }
     let sliderItem = NSMenuItem()
     sliderItem.view = snowfallSlider
-    menu.addItem(sliderItem)
+    modes.addItem(sliderItem)
+    manualControlItems.append(sliderItem)
     windHeader = .sectionHeader(title:"Wind Speed")
-    menu.addItem(windHeader)
+    modes.addItem(windHeader)
+    manualControlItems.append(windHeader)
     windSlider.changed = { [unowned self] speed in
-      guard !Preferences.liveWeather else {return}
+      guard !setupPending && !Preferences.liveWeather else {return}
       Preferences.manualWindSpeed=speed
       screens.forEach {$0.setWind(effectiveWind,automatic:Preferences.liveWeather)}
     }
-    let windItem=NSMenuItem();windItem.view=windSlider;menu.addItem(windItem)
-    menu.addItem(.separator())
+    let windItem=NSMenuItem();windItem.view=windSlider;modes.addItem(windItem)
+    manualControlItems.append(windItem)
+    modes.addItem(.separator())
     let surfaces = NSMenu()
     surfaces.autoenablesItems = false
     accumulateItem = add("Accumulate", #selector(toggleAccumulate), to: surfaces)
     meltItem = add("Melt Snow", #selector(toggleMeltSnow), to: surfaces)
     snowOnWindowsItem = add("Snow on Windows", #selector(toggleSnowOnWindows), to: surfaces)
-    surfaceItem = menu.addItem(withTitle: "Surfaces", action: nil, keyEquivalent: "")
+    surfaceItem = NSMenuItem(title: "Surfaces", action: nil, keyEquivalent: "")
     surfaceItem.submenu = surfaces
-    clearItem = add("Clear Scene", #selector(clearSnow), to: menu)
+    clearItem = add("Clear Scene", #selector(clearSnow), to: modes)
     clearItem.image = NSImage(systemSymbolName: "wind", accessibilityDescription: nil)
     let reflections = NSMenu()
     reflections.autoenablesItems = false
@@ -278,6 +375,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let settings = NSMenu()
     settings.autoenablesItems = false
     settings.delegate = self
+    settings.addItem(surfaceItem)
+    settings.addItem(.separator())
     let permissions = NSMenu()
     permissions.autoenablesItems = false
     permissions.delegate = self
@@ -289,12 +388,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     permissions.addItem(.separator())
     permissionRequestItem = add(
       "Allow Screen Recording…", #selector(allowReflections), to: permissions)
+    add("Recheck Screen Recording", #selector(recheckScreenRecording), to: permissions)
+    add("Restart Atmos…", #selector(restartAtmos), to: permissions)
     settings.addItem(withTitle: "Permissions & Activity", action: nil, keyEquivalent: "").submenu =
       permissions
     screenReflectionsToggle = add(
       "Screen Reflections", #selector(toggleScreenReflections), to: settings)
     screenReflectionsToggle.toolTip =
-      "Use captured desktop content in water. Turn off to stop capture and reflect only the wallpaper."
+      "Use captured desktop content in water. Fog Bloom has its own capture control."
+    fogBloomItem = add("Fog Bloom", #selector(toggleFogBloom), to: settings)
+    fogBloomItem.toolTip = "Scatter the colours of windows, desktop icons and effects through visible fog. Uses Screen Recording."
+    fogPermissionItem = add("Allow Fog Bloom…", #selector(allowFogBloom), to: settings)
     waterReflectionMenuItem = settings.addItem(
       withTitle: "Water Reflection Source", action: nil, keyEquivalent: "")
     waterReflectionMenuItem.submenu = reflections
@@ -307,15 +411,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     screenshotsItem = add("Include in Screenshots", #selector(toggleScreenshots), to: settings)
     settings.addItem(.separator())
     loginItem = add("Open at Login", #selector(toggleOpenAtLogin), to: settings)
+    automaticUpdateItem = add("Automatic Updates", #selector(toggleAutomaticUpdates), to: settings)
+    add("Show Setup…", #selector(showWelcome), to: settings)
     menu.addItem(withTitle: "Settings", action: nil, keyEquivalent: "").submenu = settings
     menu.addItem(.separator())
-    let website = add("Explore grobb.dev ↗", #selector(openWebsite), to: menu)
+    updateItem = add("Check for Updates…", #selector(checkForUpdates), to: menu)
+    updateItem.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
+    updater.changed = { [weak self] in
+      self?.updateItem.title = self?.updater.menuTitle ?? "Check for Updates…"
+      self?.refreshCustomMenu()
+    }
+    menu.addItem(.separator())
+    let website = add("Explore grobb.dev ↗", #selector(openWebsite), to: settings)
     website.image = NSImage(systemSymbolName: "safari", accessibilityDescription: nil)
     menu.addItem(
       withTitle: "Quit Atmos", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
     item.menu = menu
+    statusMenu = menu
     return item
+  }
+
+  @discardableResult
+  func installCustomMenu() -> AtmosMenuController? {
+    guard let menu = statusMenu else { return nil }
+    let controller = AtmosMenuController(menu: menu)
+    customMenu = controller
+    statusItem.menu = nil
+    statusItem.button?.target = self
+    statusItem.button?.action = #selector(toggleCustomMenu)
+    statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+    controller.model.invoke = { [weak self] item in
+      guard let self, item.isEnabled, let action = item.action else { return }
+      let keepsOpen = ["chooseLiveWeather", "chooseMode:", "chooseWeatherSource:", "refreshWeather",
+        "toggleAccumulate", "toggleMeltSnow", "toggleSnowOnWindows", "clearSnow", "toggleFogBloom",
+        "toggleScreenReflections", "toggleBehindWindows", "toggleFullScreen", "toggleScreenshots",
+        "toggleOpenAtLogin", "toggleAutomaticUpdates", "selectWallpaperReflections",
+        "selectSnapshotReflections", "selectLiveReflections"].contains(NSStringFromSelector(action))
+      let permissionAction = ["toggleFogBloom", "toggleScreenReflections", "selectSnapshotReflections", "selectLiveReflections"].contains(NSStringFromSelector(action)) && !ScreenRecordingAccess.shared.isGranted
+      let locationAction = NSStringFromSelector(action) == "chooseLiveWeather" && !Preferences.liveWeather && weather.locationAuthorization == .notDetermined
+      if !keepsOpen || permissionAction || locationAction { self.customMenu?.close() }
+      NSApp.sendAction(action, to: item.target, from: item)
+      self.refreshCustomMenu()
+    }
+    controller.model.intensityChanged = { [weak self] in self?.select($0); self?.refreshCustomMenu() }
+    controller.model.selectPreset = { [weak self] preset in self?.activatePreset(preset) }
+    controller.model.beginNewPreset = { [weak self] in self?.beginNewAtmosphere() }
+    controller.model.cloudCoverageChanged = { [weak self] cover in
+      guard let self, !setupPending, !Preferences.liveWeather else { return }
+      Preferences.manualCloudCoverage = cover
+      applyWeather()
+    }
+    controller.model.windChanged = { [weak self] speed in
+      guard let self, !setupPending, !Preferences.liveWeather else { return }
+      Preferences.manualWindSpeed = speed
+      screens.forEach { $0.setWind(self.effectiveWind, automatic: false) }
+      refreshCustomMenu()
+    }
+    return controller
+  }
+
+  func activatePreset(_ preset: AtmospherePreset) {
+    guard !setupPending, preset.isValid else { return }
+    Preferences.liveWeather = false
+    Preferences.manualScene = preset.scene
+    snowfall = Snowfall(rawValue: preset.intensity) ?? .steady
+    Preferences.snowfall = snowfall
+    Preferences.manualWindSpeed = preset.wind
+    AtmosphereLibrary.shared.selectedID = preset.id
+    AtmosphereLibrary.shared.name = preset.name
+    weather.setEnabled(false)
+    applyWeather()
+  }
+  func beginNewAtmosphere() {
+    guard !setupPending else { return }
+    Preferences.liveWeather = false
+    Preferences.manualScene = WeatherScene(primary: .none)
+    Preferences.manualWindSpeed = 4
+    snowfall = .steady; Preferences.snowfall = .steady
+    weather.setEnabled(false)
+    applyWeather()
+  }
+
+  @objc private func toggleCustomMenu() {
+    guard let customMenu, let menu = statusMenu, let button = statusItem.button else { return }
+    if customMenu.isShown { customMenu.close(); return }
+    if Date().timeIntervalSince(customMenu.lastClosed) < 0.18 { return }
+    let captureAccess = ScreenRecordingAccess.shared
+    if captureAccess.returningFromSettings {
+      captureAccess.returningFromSettings = false
+      captureAccess.recheck()
+    }
+    welcome?.menuOpened()
+    menuNeedsUpdate(menu)
+    customMenu.model.refresh(weather: weather)
+    customMenu.show(from: button)
+  }
+
+  private func refreshCustomMenu() {
+    guard let customMenu, customMenu.isShown, let menu = statusMenu else { return }
+    menuNeedsUpdate(menu)
+    customMenu.model.refresh(weather: weather)
   }
 
   @discardableResult
@@ -326,39 +522,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func updateWeatherControls() {
-    snowfallSlider.automatic = Preferences.liveWeather
-    snowfallSlider.awaitingWeather = Preferences.liveWeather && weather.current == nil
+    snowfallSlider.automatic = setupPending || Preferences.liveWeather
+    snowfallSlider.awaitingWeather = !setupPending && Preferences.liveWeather && weather.current == nil
     snowfallSlider.snowfall = effectiveIntensity
-    intensityHeader.title = Preferences.liveWeather ? "Intensity · Automatic" : "Intensity"
-    windSlider.automatic=Preferences.liveWeather
-    windSlider.awaitingWeather=Preferences.liveWeather && weather.current == nil
-    windSlider.speed=Preferences.liveWeather ? weather.current?.windSpeed ?? 0 : Preferences.manualWindSpeed
-    windHeader.title=Preferences.liveWeather ? "Wind Speed · Automatic":"Wind Speed"
+    intensityHeader.title = setupPending ? "Paused for Setup" : Preferences.liveWeather ? "Intensity · Automatic" : "Intensity"
+    windSlider.automatic=setupPending || Preferences.liveWeather
+    windSlider.awaitingWeather = !setupPending && Preferences.liveWeather && weather.current == nil
+    windSlider.speed = setupPending ? 0 : Preferences.liveWeather ? weather.current?.windSpeed ?? 0 : Preferences.manualWindSpeed
+    for item in manualControlItems { item.isHidden = Preferences.liveWeather || setupPending }
+    windHeader.title = setupPending ? "Wind Speed · Paused" : Preferences.liveWeather ? "Wind Speed · Automatic":"Wind Speed"
   }
 
-  func menuWillOpen(_ menu: NSMenu) {
-    updateWeatherControls()
-  }
-
-  func menuNeedsUpdate(_ menu: NSMenu) {
-    updateWeatherControls()
-    accumulateItem.state = accumulates ? .on : .off
-    let effect = self.effect
-    let autumn = scene.stacked != nil
-    let accumulating = effect.canAccumulate || autumn
-    let water = effect.hasWater
-    liveItem.state = Preferences.liveWeather ? .on : .off
-    liveItem.title = Preferences.liveWeather ? "Live Weather: On" : "Live Weather: Off"
+  private func updateLiveWeatherMenu() {
+    let scene = self.scene, effect = scene.primary
+    liveItem.state = !setupPending && Preferences.liveWeather ? .on : .off
+    liveItem.isEnabled = !setupPending
+    sceneItem.isEnabled = !setupPending
+    liveItem.title = setupPending ? "Live Weather · Paused for Setup" : Preferences.liveWeather ? "Live Weather: On" : "Live Weather: Off"
     for (mode, item) in effectItems {
       item.state =
         !Preferences.liveWeather
           && (mode == effect || mode == scene.stacked || mode == scene.wildlife) ? .on : .off
     }
     sceneItem.title =
-      Preferences.liveWeather ? "Choose a Manual Scene…" : "Manual Scene · \(scene.summary)"
+      setupPending ? "Manual Effects · Paused for Setup" : "Manual Effects"
     weatherDetailsItem.title = Preferences.liveWeather ? "Local Weather · Live" : "Local Weather"
     weatherCard.update(weather: weather)
-    weatherRefreshItem.isEnabled = Preferences.liveWeather
+    weatherRefreshItem.isEnabled = !setupPending && Preferences.liveWeather
     weatherProviderItem.title = "\(weather.provider) ↗"
     weatherProviderItem.image = weather.provider == "Apple Weather" ? weather.attributionMark : nil
     weatherProviderItem.toolTip =
@@ -368,6 +558,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     for (source, item) in sourceItems {
       item.state = Preferences.weatherSource == source ? .on : .off
     }
+  }
+
+  func menuWillOpen(_ menu: NSMenu) {
+    if menu === statusItem.menu { welcome?.menuOpened(); menuNeedsUpdate(menu) }
+    updateWeatherControls()
+  }
+
+  func menuNeedsUpdate(_ menu: NSMenu) {
+    updateItem.isEnabled = !setupPending
+    updateWeatherControls()
+    accumulateItem.state = accumulates ? .on : .off
+    let effect = self.effect
+    let autumn = scene.stacked != nil
+    let accumulating = effect.canAccumulate || autumn
+    let water = effect.hasWater
+    updateLiveWeatherMenu()
     meltItem.title =
       effect.hasBanks
       ? (effect == .clouds ? "Dissipate Clouds" : "Dissipate Mist")
@@ -381,6 +587,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     clearItem.title = "Clear Scene"
     surfaceItem.isHidden = !accumulating && effect != .hail
     screenReflectionsToggle.state = Preferences.screenReflections ? .on : .off
+    fogBloomItem.state = Preferences.fogBloom ? .on : .off
+    fogPermissionItem.isHidden = !Preferences.fogBloom || ScreenRecordingAccess.shared.isGranted
     refreshPermissions()
     accumulateItem.title =
       effect.hasBanks
@@ -392,7 +600,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     snowOnWindowsItem.isHidden = !accumulating && effect != .hail
     reflectionsItem.isHidden = false
     reflectionStatusItem.isHidden = false
-    reflectionPermissionItem.isHidden = CGPreflightScreenCaptureAccess()
+    reflectionPermissionItem.isHidden = ScreenRecordingAccess.shared.isGranted
     reflectionStatusItem.title =
       screens.first(where: { $0.isCapturingReflections })?.reflectionStatus ?? screens.first?
       .reflectionStatus ?? "Wallpaper reflections"
@@ -400,7 +608,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     meltItem.isEnabled = accumulates && accumulating
     snowOnWindowsItem.state = snowOnWindows ? .on : .off
     snowOnWindowsItem.isEnabled = accumulating || effect == .hail
-    clearItem.isEnabled = screens.contains(where: { $0.hasContent })
+    clearItem.isEnabled = !setupPending && screens.contains(where: { $0.hasContent })
+    surfaceItem.isEnabled = !setupPending
     reflectionsItem.state = Preferences.screenReflections ? .off : .on
     reflectionsItem.isEnabled = true
     snapshotReflectionsItem.state =
@@ -412,10 +621,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     fullScreenItem.isEnabled = !behindWindows
     screenshotsItem.state = Preferences.showInScreenshots ? .on : .off
     loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+    automaticUpdateItem.state = Preferences.automaticUpdates ? .on : .off
   }
 
   private func select(_ snowfall: Snowfall) {
-    guard !Preferences.liveWeather else { return }
+    guard !setupPending && !Preferences.liveWeather else { return }
     self.snowfall = snowfall
     Preferences.snowfall = snowfall
     for snow in screens { snow.setIntensity(snowfall) }
@@ -462,6 +672,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     for snow in screens {
       snow.window.showsInScreenshots = Preferences.showInScreenshots
       snow.dock.window.showsInScreenshots = Preferences.showInScreenshots
+      snow.backgroundFog.window.showsInScreenshots = Preferences.showInScreenshots
     }
   }
 
@@ -479,10 +690,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc private func chooseMode(_ sender: NSMenuItem) {
+    guard !setupPending else { return }
     guard let raw = sender.representedObject as? String, let effect = WeatherEffect(rawValue: raw)
     else { return }
     var selection = Preferences.manualScene
     selection.toggleManual(effect)
+    if !effect.isStacked {
+      let cover = selection.primary == .none ? 0 : effect.defaultCloudCoverage
+      selection.manualCloudCover = Float(cover / 100); selection.clouds = Float(cover / 100)
+    }
     Preferences.manualScene = selection
     Preferences.liveWeather = false
     weather.setEnabled(false)
@@ -490,6 +706,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc private func chooseLiveWeather() {
+    guard !setupPending else { return }
+    weather.requestsLocationAuthorization = true
     Preferences.liveWeather.toggle()
     weather.setEnabled(Preferences.liveWeather)
     applyWeather()
@@ -498,7 +716,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private func applyWeather() {
     // A custom menu view can survive multiple tracking sessions. Restore its
     // controls immediately, even when AppKit does not request a menu update.
-    if statusItem != nil { updateWeatherControls() }
+    if statusItem != nil { updateWeatherControls(); updateLiveWeatherMenu() }
+    refreshCustomMenu()
     let scene = self.scene
     for snow in screens {
       snow.setScene(scene)
@@ -507,9 +726,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     updateStatusIcon()
     prepareReflectionsIfNeeded()
-    statusItem?.button?.image =
-      NSImage(
-        systemSymbolName: statusEffect.symbol, accessibilityDescription: "Atmos — \(scene.summary)")
+    statusItem?.button?.image = EffectArtwork.statusImage(for: statusEffect)
+    statusItem?.button?.setAccessibilityLabel("Atmos — \(scene.summary)")
     statusItem?.button?.toolTip =
       Preferences.liveWeather
       ? "Atmos · Live Weather On · \(weather.status)" : "Atmos · Manual · \(scene.summary)"
@@ -521,7 +739,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     weather.setSource(source)
   }
 
-  @objc private func refreshWeather() { weather.refresh(force: true) }
+  @objc private func refreshWeather() {
+    weather.requestsLocationAuthorization = true
+    weather.refresh(force: true)
+  }
+
+  @objc private func checkForUpdates() { updater.check() }
+  @objc private func toggleAutomaticUpdates() {
+    Preferences.automaticUpdates.toggle()
+    updateActivity()
+  }
 
   @objc private func openLocationSettings() {
     if let url = URL(
@@ -540,17 +767,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func refreshPermissions() {
-    let granted = CGPreflightScreenCaptureAccess()
+    let granted = ScreenRecordingAccess.shared.isGranted
     permissionRequestItem.isHidden = granted
     let active = screens.contains { $0.isCapturingReflections }
     let stopped = screens.contains { $0.reflectionsStoppedByUser }
     let screen = PermissionPresentation.screen(
-      granted: granted, enabled: Preferences.screenReflections, active: active, stopped: stopped)
+      granted: granted, enabled: Preferences.screenReflections || Preferences.fogBloom, active: active, stopped: stopped)
     let location = PermissionPresentation.location(
       status: weather.locationAuthorization, enabled: weather.enabled, locating: weather.isLocating,
       paused: weather.isSuspended)
     let login = SMAppService.mainApp.status
-    updatePermission(screenPermissionItem, title: "Screen Recording", state: screen)
+    if ScreenRecordingAccess.shared.state == .checking {
+      screenPermissionItem.title = "Screen Recording · Checking…"
+    } else { updatePermission(screenPermissionItem, title: "Screen Recording", state: screen) }
     updatePermission(locationPermissionItem, title: "Location Services", state: location)
     updatePermission(
       loginPermissionItem, title: "Open at Login",
@@ -570,11 +799,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc private func openScreenRecordingSettings() {
+    ScreenRecordingAccess.shared.returningFromSettings = true
     NSWorkspace.shared.open(
       URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
   }
 
+  @objc private func recheckScreenRecording() { ScreenRecordingAccess.shared.recheck() }
+
+  @objc private func restartAtmos() {
+    let helper = Process()
+    helper.executableURL = URL(fileURLWithPath: "/bin/sh")
+    helper.arguments = ["-c", "attempt=0; while /bin/kill -0 \"$1\" 2>/dev/null; do attempt=$((attempt+1)); [ \"$attempt\" -lt 300 ] || exit 1; /bin/sleep 0.1; done; /usr/bin/open -n \"$2\"", "atmos-restart", String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundleURL.path]
+    helper.standardOutput = FileHandle.nullDevice; helper.standardError = FileHandle.nullDevice
+    do { try helper.run(); NSApp.terminate(nil) }
+    catch { NSSound.beep() }
+  }
+
   @objc private func openLoginSettings() { SMAppService.openSystemSettingsLoginItems() }
+
+  @objc private func toggleFogBloom() {
+    Preferences.fogBloom.toggle()
+    if Preferences.fogBloom && !ScreenRecordingAccess.shared.isGranted {
+      requestSetupPermission(.screen)
+    }
+    screens.forEach { $0.setFogBloom(Preferences.fogBloom) }
+  }
+  @objc private func allowFogBloom() {
+    requestSetupPermission(.screen)
+    screens.forEach { $0.setFogBloom(Preferences.fogBloom) }
+  }
 
   @objc private func toggleScreenReflections() {
     if Preferences.screenReflections {
@@ -599,29 +852,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       Preferences.reflectionConsentVersion = 0
       Preferences.reflectionConsentIdentity = identity
     }
-    guard statusItem != nil, effect.hasWater, screens.contains(where: { !$0.covered }),
+    guard !setupPending, ScreenRecordingAccess.shared.isGranted,
+      statusItem != nil, effect.hasWater, screens.contains(where: { !$0.covered }),
       Preferences.reflectionConsentVersion < 2
     else { return }
     Preferences.reflectionConsentVersion = 2
     Preferences.screenReflections = true
     screens.forEach { $0.setReflections(true) }
-    DispatchQueue.main.async { [weak self] in
-      guard let self, effect.hasWater, !CGPreflightScreenCaptureAccess() else { return }
-      NSApp.activate(ignoringOtherApps: true)
-      _ = CGRequestScreenCaptureAccess()
-      screens.forEach { $0.setReflections(Preferences.screenReflections) }
-    }
+
   }
 
   @objc private func allowReflections() {
     recordReflectionChoice(true)
     NSApp.activate(ignoringOtherApps: true)
-    if !CGPreflightScreenCaptureAccess() && !CGRequestScreenCaptureAccess(),
+    if !ScreenRecordingAccess.shared.isGranted && !CGRequestScreenCaptureAccess(),
       let url = URL(
         string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
     {
+      ScreenRecordingAccess.shared.returningFromSettings = true
       NSWorkspace.shared.open(url)
-    }
+    } else { ScreenRecordingAccess.shared.recheck() }
     screens.forEach { $0.setReflections(true) }
   }
 
@@ -633,14 +883,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   @objc private func selectSnapshotReflections() {
     Preferences.liveReflections = false
     recordReflectionChoice(true)
-    if !CGPreflightScreenCaptureAccess() { allowReflections() }
+    if !ScreenRecordingAccess.shared.isGranted { allowReflections() }
     screens.forEach { $0.setReflections(true) }
   }
 
   @objc private func selectLiveReflections() {
     Preferences.liveReflections = true
     recordReflectionChoice(true)
-    if !CGPreflightScreenCaptureAccess() { allowReflections() }
+    if !ScreenRecordingAccess.shared.isGranted { allowReflections() }
     screens.forEach { $0.setReflections(true) }
   }
 
@@ -654,6 +904,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     power.changed = { [unowned self] in screens.forEach { $0.apply(power.budget) } }
     let workspace = NSWorkspace.shared.notificationCenter
     let distributed = DistributedNotificationCenter.default()
+    observe(.default, NSApplication.didBecomeActiveNotification) { _ in
+      let access = ScreenRecordingAccess.shared
+      if access.returningFromSettings { access.returningFromSettings = false; access.recheck() }
+    }
 
     observe(workspace, NSWorkspace.screensDidSleepNotification) { $0.screensAsleep = true }
     observe(workspace, NSWorkspace.screensDidWakeNotification) { $0.screensAsleep = false }
@@ -699,9 +953,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func updateActivity() {
-    let awake = !screensAsleep && !screenLocked && !sessionInactive
+    let awake = !setupPending && !screensAsleep && !screenLocked && !sessionInactive
     let visible = screens.contains { !$0.givesWay }
-    weather.setSuspended(!awake || !visible)
+    updater.setAutomaticActivity(enabled: Preferences.automaticUpdates, active: awake)
+    let preparing = setupPending && setupWeatherPreparing && !screensAsleep && !screenLocked && !sessionInactive
+    // Fullscreen pauses effects, not the weather card or an explicitly started
+    // setup fetch. Location/networking stop for lock, sleep and earlier setup pages.
+    weather.setSuspended(!(awake || preparing))
     if awake && visible && statusItem != nil {
       prepareReflectionsIfNeeded()
       if liveSceneTimer == nil {

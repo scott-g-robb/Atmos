@@ -12,11 +12,11 @@ version = plistlib.loads((root / 'Resources/Info.plist').read_bytes())['CFBundle
 destination = root / 'dist' / f'Atmos-{version}-source.zip'
 destination.parent.mkdir(exist_ok=True)
 entries = [
-    '.github', '.gitignore', 'LICENSE', 'NOTICE.md', 'README.md', 'RELEASING.md',
-    'Package.swift', 'Resources', 'Sources', 'Tests', 'docs', 'site', 'scripts',
+    '.github', '.gitignore', 'LICENSE', 'NOTICE.md', 'README.md', 'RELEASING.md', 'CHANGELOG.md',
+    'Package.swift', 'Atmos.xcodeproj', 'Resources', 'Sources', 'Tests', 'docs', 'site', 'scripts',
     'weather-core', 'build.sh', 'install.command', 'make-installer.sh', 'release.sh', 'test.sh',
 ]
-excluded = {'target', 'downloads', '.DS_Store', '__pycache__', '.env'}
+excluded = {'target', 'downloads', '.DS_Store', '__pycache__', '.env', 'xcuserdata'}
 private_suffixes = {'.p8', '.p12', '.pem', '.key', '.cer', '.mobileprovision', '.provisionprofile', '.log', '.pyc'}
 with zipfile.ZipFile(destination, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
     for entry in entries:

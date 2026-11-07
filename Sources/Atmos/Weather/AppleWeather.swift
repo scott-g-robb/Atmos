@@ -32,17 +32,34 @@ enum AppleWeather {
     let attribution: Attribution
   }
 
-  static func fetch(at location: CLLocation) async throws -> Reading {
+  /// Release verification uses a fixed public test location and forbids the
+  /// personal Keychain fallback. It never prints weather, credentials or tokens.
+  static func verifyNativeAccess() async throws {
+    guard isConfigured else { throw URLError(.userAuthenticationRequired) }
+    _ = try await WeatherAttempt.run(timeout: 20) {
+      try await fetchNative(at: CLLocation(latitude: 51.50, longitude: -0.12))
+    }
+  }
+
+  static func fetch(at location: CLLocation, countryCode: String? = nil) async throws -> Reading {
     if isConfigured {
       do { return try await fetchNative(at: location) } catch {
         guard !Task.isCancelled, WeatherKitCredentials.exists else { throw error }
       }
     }
-    return try await AppleWeatherREST.fetch(at: location)
+    return try await AppleWeatherREST.fetch(at: location, countryCode: countryCode)
   }
 
   private static func fetchNative(at location: CLLocation) async throws -> Reading {
-    let current = try await WeatherService.shared.weather(for: location, including: .current)
+    // Unsupported alert regions must not discard a successful current reading.
+    let current: CurrentWeather
+    var alerts: [WeatherAlert]? = nil
+    do {
+      (current, alerts) = try await WeatherService.shared.weather(for: location, including: .current, .alerts)
+    } catch {
+      try Task.checkCancellation()
+      current = try await WeatherService.shared.weather(for: location, including: .current)
+    }
     let attribution = try await WeatherService.shared.attribution
     let mapping = mapping(current.condition)
     var snapshot = WeatherSnapshot(
@@ -54,12 +71,19 @@ enum AppleWeather {
         * 3_600_000,
       isDay: current.isDaylight ? 1 : 0)
     snapshot.windGust = current.wind.gust?.converted(to: .kilometersPerHour).value
+    snapshot.visibility = current.visibility.converted(to: .meters).value
     snapshot.humidity = current.humidity * 100
     snapshot.cloudCover = current.cloudCover * 100
     snapshot.apparentTemperature = current.apparentTemperature.converted(to: .celsius).value
     snapshot.reportedCondition = current.condition.accessibilityDescription
     snapshot.preferredEffect = mapping.effect
     snapshot.precipitationUnit = "mm/h"
+    snapshot.alertsAvailable = alerts != nil
+    snapshot.alerts = (alerts ?? []).map {
+      LocalWeatherAlert(id: $0.detailsURL.absoluteString, summary: $0.summary, source: $0.source,
+        detailsURL: $0.detailsURL, severity: .init(rawValue: $0.severity.rawValue) ?? .unknown,
+        effective: $0.metadata.date, expires: $0.metadata.expirationDate)
+    }.filter { $0.hasValidLink }
     guard snapshot.isUsable() else { throw URLError(.cannotParseResponse) }
     return Reading(
       snapshot: snapshot,

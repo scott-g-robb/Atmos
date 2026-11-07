@@ -38,68 +38,78 @@ final class WeatherRecoveryTests: XCTestCase {
     var calls = 0
     func apple() throws -> AppleWeather.Reading {
       calls += 1
-      if calls == 1 { throw URLError(.notConnectedToInternet) }
+      if calls <= 2 { throw URLError(.notConnectedToInternet) }
       return appleReading()
     }
     let first = try await WeatherRequest.fetch(
-      source: .automatic, appleAvailable: true,
+      source: .automatic, appleAvailable: true, retryDelay: 0,
       apple: { try apple() }, openMeteo: { self.snapshot(code: 3) })
     XCTAssertEqual(first.snapshot.effect, .clouds)
     let next = try await WeatherRequest.fetch(
-      source: .automatic, appleAvailable: true,
+      source: .automatic, appleAvailable: true, retryDelay: 0,
       apple: { try apple() }, openMeteo: { self.snapshot(code: 3) })
     XCTAssertEqual(next.snapshot.effect, .drizzle)
-    XCTAssertEqual(calls, 2)
+    XCTAssertEqual(calls, 3)
   }
-  func testExplicitProvidersNeverSilentlySwitch() async throws {
-    var appleCalls = 0
-    var fallbackCalls = 0
-    do {
-      _ = try await WeatherRequest.fetch(
-        source: .apple, appleAvailable: true,
-        apple: {
-          appleCalls += 1
-          throw URLError(.timedOut)
-        },
-        openMeteo: {
-          fallbackCalls += 1
-          return self.snapshot(code: 3)
-        })
-      XCTFail("Explicit Apple must report an Apple failure")
-    } catch { XCTAssertEqual(fallbackCalls, 0) }
+  func testAppleRetriesBeforeLabelledFallbackAndExplicitOpenMeteoDoesNotCallApple() async throws {
+    var appleCalls = 0, fallbackCalls = 0
+    let reading = try await WeatherRequest.fetch(
+      source: .apple, appleAvailable: true, retryDelay: 0,
+      apple: { appleCalls += 1;throw URLError(.timedOut) },
+      openMeteo: { fallbackCalls += 1;return self.snapshot(code:3) })
+    guard case .openMeteo = reading else { return XCTFail("Failed Apple retries must reach fallback") }
+    XCTAssertEqual(appleCalls,2);XCTAssertEqual(fallbackCalls,1)
     _ = try await WeatherRequest.fetch(
       source: .openMeteo, appleAvailable: true,
-      apple: {
-        appleCalls += 1
-        return self.appleReading()
-      },
-      openMeteo: {
-        fallbackCalls += 1
-        return self.snapshot(code: 3)
-      })
-    XCTAssertEqual(appleCalls, 1)
-    XCTAssertEqual(fallbackCalls, 1)
+      apple: { appleCalls += 1;return self.appleReading() },
+      openMeteo: { fallbackCalls += 1;return self.snapshot(code:3) })
+    XCTAssertEqual(appleCalls,2);XCTAssertEqual(fallbackCalls,2)
   }
   func testWakeRecoveryRetriesQuicklyAndAppleFallbackHasNoHourLongHold() {
     let now = Date(timeIntervalSince1970: 1000)
     var recovery = WeatherRecovery()
     recovery.resume(at: now)
-    XCTAssertEqual(recovery.failureDelay(1, at: now), 5)
-    XCTAssertEqual(recovery.failureDelay(2, at: now.addingTimeInterval(5)), 10)
-    XCTAssertEqual(recovery.failureDelay(3, at: now.addingTimeInterval(15)), 20)
+    XCTAssertEqual(recovery.nextFailureDelay(), 1)
+    XCTAssertEqual(recovery.nextFailureDelay(), 2)
+    XCTAssertEqual(recovery.nextFailureDelay(), 3)
     XCTAssertFalse(recovery.isRecovering(at: now.addingTimeInterval(121)))
     XCTAssertEqual(WeatherRecovery.appleRetryDelay(1), 30)
     XCTAssertLessThanOrEqual(WeatherRecovery.appleRetryDelay(100), 300)
   }
-  func testNewInstallStartsLiveWithNoManualLayersWhileSavedChoicesSurvive() {
+  func testLocationAndWeatherFailuresRetryWithTheExactScheduleThenStop() {
+    var recovery = WeatherRecovery()
+    let delays = (0..<14).compactMap { _ in recovery.nextFailureDelay() }
+    XCTAssertEqual(delays, [1, 2, 3, 5, 15] + Array(repeating: 30, count: 9))
+    XCTAssertEqual(recovery.failedAttempts, 14)
+    XCTAssertFalse(recovery.exhausted, "The fifteenth request must still be allowed to run")
+    XCTAssertNil(recovery.nextFailureDelay())
+    XCTAssertTrue(recovery.exhausted)
+    for _ in 0..<20 { XCTAssertNil(recovery.nextFailureDelay()) }
+    XCTAssertEqual(recovery.failedAttempts, 15)
+  }
+  func testSuccessManualRefreshAndWakeStartANewRetryBudget() {
+    var recovery = WeatherRecovery()
+    for _ in 0..<16 { _ = recovery.nextFailureDelay() }
+    XCTAssertTrue(recovery.exhausted)
+    recovery.resetRetries()
+    XCTAssertFalse(recovery.exhausted)
+    XCTAssertEqual(recovery.nextFailureDelay(), 1)
+    for _ in 0..<15 { _ = recovery.nextFailureDelay() }
+    XCTAssertTrue(recovery.exhausted)
+    recovery.resume()
+    XCTAssertFalse(recovery.exhausted)
+    XCTAssertEqual(recovery.failedAttempts, 0)
+    XCTAssertEqual(recovery.nextFailureDelay(), 1)
+  }
+  func testNewInstallStartsManualWithNoLayersWhileSavedChoicesSurvive() {
     let name = "Atmos.InstallDefaultsTests.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: name)!
     defer { defaults.removePersistentDomain(forName: name) }
     defaults.set(true, forKey: "atmosMigratedPreferences3")
     Preferences.registerDefaults(in: defaults)
-    XCTAssertTrue(defaults.bool(forKey: "liveWeather"))
+    XCTAssertFalse(defaults.bool(forKey: "liveWeather"))
     XCTAssertEqual(defaults.string(forKey: "weatherEffect"), WeatherEffect.none.rawValue)
-    XCTAssertEqual(defaults.persistentDomain(forName: name)?["liveWeather"] as? Bool, true)
+    XCTAssertEqual(defaults.persistentDomain(forName: name)?["liveWeather"] as? Bool, false)
     XCTAssertEqual(defaults.persistentDomain(forName: name)?["weatherEffect"] as? String, "none")
     XCTAssertNil(defaults.string(forKey: "seasonalDrift"))
     XCTAssertNil(defaults.string(forKey: "wildlifeEffect"))

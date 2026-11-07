@@ -56,6 +56,13 @@ enum WeatherEffect: String, CaseIterable, Codable {
     .leaves, .cherryBlossoms, .dandelionSeeds, .rosePetals, .mapleSeeds, .cottonwood,
   ]
   static let wildlife: [Self] = [.butterflies, .fireflies, .birds]
+  var defaultCloudCoverage: Double {
+    switch self {
+    case .rain, .drizzle, .storm, .lightning, .sleet, .hail, .snow: return 100
+    case .clouds: return 65
+    default: return 0
+    }
+  }
   var isStacked: Bool { Self.seasonal.contains(self) || Self.wildlife.contains(self) }
   var usesSnowSimulation: Bool { self == .snow || Self.seasonal.contains(self) }
   /// Shared leaf renderer style; zero is snow, one preserves the original autumn artwork.
@@ -83,6 +90,8 @@ struct WeatherSnapshot: Decodable, Equatable {
   let windDirection: Double
   let precipitation: Double
   let isDay: Int
+  /// Provider visibility in metres, independent of the user’s display units.
+  var visibility: Double? = nil
   var humidity: Double? = nil
   var cloudCover: Double? = nil
   var apparentTemperature: Double? = nil
@@ -93,12 +102,14 @@ struct WeatherSnapshot: Decodable, Equatable {
   var windGust: Double? = nil
   /// Rounded, in-memory coordinate for seasonal timing; never persisted.
   var latitude: Double? = nil
+  var alerts: [LocalWeatherAlert] = []
+  var alertsAvailable = false
   var precipitationRate: Double {
     precipitationUnit == "mm/h" ? precipitation : precipitation * 3600 / (interval ?? 900)
   }
 
   enum CodingKeys: String, CodingKey {
-    case time, interval
+    case time, interval, visibility
     case windGust = "wind_gusts_10m"
     case weatherCode = "weather_code"
     case temperature = "temperature_2m"
@@ -109,6 +120,17 @@ struct WeatherSnapshot: Decodable, Equatable {
     case humidity = "relative_humidity_2m"
     case cloudCover = "cloud_cover"
     case apparentTemperature = "apparent_temperature"
+  }
+
+  /// A gentle logarithmic display mapping, not a meteorological fog classification.
+  /// Five miles (about 8 km) gives light haze; dense fog needs much lower visibility.
+  var visibilityFogDensity: Float {
+    guard let visibility, visibility.isFinite, visibility >= 0 else { return 0 }
+    return Float(min(0.9, max(0, log(16_000 / max(50, visibility)) / log(320) * 0.9)))
+  }
+  var visibilityDescription: String? {
+    guard let visibility, visibility.isFinite, visibility >= 0 else { return nil }
+    return visibility < 1_000 ? "\(Int(visibility.rounded())) m" : String(format: "%.1f km", visibility / 1_000)
   }
 
   var effect: WeatherEffect {
@@ -227,7 +249,7 @@ enum WeatherAPI {
       .init(
         name: "current",
         value:
-          "weather_code,temperature_2m,apparent_temperature,relative_humidity_2m,cloud_cover,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation,is_day"
+          "weather_code,temperature_2m,apparent_temperature,relative_humidity_2m,cloud_cover,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation,is_day,visibility"
       ),
       .init(name: "wind_speed_unit", value: "kmh"), .init(name: "timeformat", value: "unixtime"),
       .init(name: "forecast_days", value: "1"),
@@ -239,6 +261,7 @@ enum WeatherAPI {
 /// Weather remains the base layer; seasonal material and wildlife have independent lifetimes.
 struct WeatherScene: Equatable {
   var primary: WeatherEffect
+  var manualCloudCover: Float?
   var clouds: Float = 0
   var sunlight: Float = 0
   var fireflies: Float = 0  // Legacy secondary-layer compatibility.
@@ -247,6 +270,9 @@ struct WeatherScene: Equatable {
   var stacked: WeatherEffect?
   var wildlife: WeatherEffect?
   var overlayStrength: Float = 1
+  var fog: Float = 0
+  var fogIsVisibilityDriven = false
+  var includesSky = true
 
   init(primary: WeatherEffect, stacked: WeatherEffect? = nil, wildlife: WeatherEffect? = nil) {
     self.primary = primary
@@ -255,17 +281,39 @@ struct WeatherScene: Equatable {
   }
   init(weather: WeatherSnapshot, date: Date = Date()) {
     primary = weather.effect
+    let warnings = weather.activeAlerts(at: date)
+    let warningEffects = warnings.compactMap(\.visualEffect)
+    if let effect = warningEffects.first(where: { $0 != .mist }) {
+      if effect == .lightning || [.clouds, .sunlight, .none].contains(primary) {
+        primary = effect
+      }
+    }
+    if warningEffects.contains(.mist) {
+      fog = warnings.filter { $0.visualEffect == .mist }.map { $0.severity.fogDensity }.max() ?? 0
+      if !primary.hasWater && primary != .snow && primary != .hail { primary = .mist }
+    }
+    if weather.visibilityFogDensity > fog {
+      fog = weather.visibilityFogDensity
+      fogIsVisibilityDriven = true
+    }
     let dynamics = WeatherDynamics(weather: weather)
     self.dynamics = dynamics
     clouds = dynamics.cloudCover
     sunlight =
-      weather.isDay == 1 && ![WeatherEffect.storm, .lightning, .mist].contains(primary)
-      ? pow(1 - clouds, 2) : 0
+      weather.isDay == 1 && fog < 0.45 && ![WeatherEffect.storm, .lightning, .mist].contains(primary)
+      ? pow(1 - clouds, 2) * (1 - fog) : 0
     strength = dynamics.precipitationStrength
     let overlays = SeasonalWeather.overlays(weather: weather, date: date)
     stacked = overlays.material
     wildlife = overlays.wildlife
     overlayStrength = overlays.strength
+    // Keep light haze layered with the observed weather, with only one nature accent.
+    if fogIsVisibilityDriven {
+      if fog > 0.25 || (fog > 0.06 && stacked != nil) { wildlife = nil }
+      if fog > 0.5 { stacked = nil }
+    }
+    if warningEffects.contains(.mist) { wildlife = nil }
+    if [.storm, .lightning, .snow, .sleet, .hail].contains(primary) { stacked = nil; wildlife = nil }
   }
   var summary: String {
     var names = primary == .none ? (dynamics != nil ? ["Clear night"] : []) : [primary.title]
@@ -275,6 +323,7 @@ struct WeatherScene: Equatable {
       names.append("Clouds")
     }
     if sunlight > 0.05 && primary != .sunlight { names.append("Sunbeams") }
+    if fog > 0 && primary != .mist { names.append(fogIsVisibilityDriven && fog < 0.3 ? "Haze" : "Fog") }
     if let stacked { names.append(stacked.title) }
     if let wildlife { names.append(wildlife.title) }
     return names.isEmpty ? "All layers off" : names.joined(separator: " + ")

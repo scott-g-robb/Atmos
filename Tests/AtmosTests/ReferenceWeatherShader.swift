@@ -199,3 +199,45 @@ let referenceWeatherShaderSource = """
   }
 
   """
+
+// Atmos 0.14.0 cloud appearance, retained as a visual regression reference.
+let originalCloudVolumeFragment = """
+      if(in.kind==2.0 || in.kind==7.0 || in.kind==12.0) {
+          bool bank=in.kind==7.0;bool cloud=in.kind==12.0;bool storm=cloud && in.style>0.5;
+          if(bank) for(int i=0;i<int(u.details.z);i++){float4 b=blockers[i];if(in.world.x>=b.x && in.world.x<=b.z && in.world.y>=b.y && in.world.y<=b.w)discard_fragment();}
+          float4 flow=smokeAt(in.world,smoke,u);
+          float2 advected=in.world*0.011-flow.xy*0.018+float2(-u.time*(0.018+u.climate.z*0.0005),in.seed*19.0);
+          float envelope;
+          if(cloud) {
+              float lower=0.12+weatherNoise(float2(in.world.x*0.009-u.time*0.012,7.3))*0.42;
+              envelope=smoothstep(lower-0.16,lower+0.2,in.uv.y);
+              if(u.climate.w>0.5) {
+                  float patch=weatherNoise(float2(in.world.x*0.0018-u.time*u.climate.z*0.000025,1.7));
+                  float threshold=1.0-u.climate.x;
+                  // Near-overcast has almost no gaps; cover is never capped at the old 80%.
+                  envelope*=smoothstep(threshold-0.06,threshold+0.06,patch);
+              }
+          } else if(bank) {
+              envelope=smoothstep(0.0,0.09,min(in.uv.x,1.0-in.uv.x))*smoothstep(0.0,0.11,in.uv.y)*(1.0-smoothstep(0.30,0.98,in.uv.y));
+          } else { envelope=exp(-dot(p*float2(1,1.15),p*float2(1,1.15))*2.6); }
+          if(!cloud)envelope*=smoothstep(0.0,0.20,min(min(in.uv.x,1-in.uv.x),min(in.uv.y,1-in.uv.y)));
+          if(envelope==0.0 || alpha==0.0)discard_fragment();
+          float transmittance=1;float3 scattering=0;
+          // Integrate density along a short 3D ray, with light extinction within each billow.
+          for(int sample=0;sample<6;sample++) {
+              float z=(float(sample)+0.5)/6.0;
+              float3 pos=float3(advected+float2(z*0.43,z*0.12),z*2.8+in.seed*8);
+              float n=volumeNoise(pos);float shape=smoothstep(0.22,0.77,n);
+              float density=shape*envelope*mix(0.18,1.0,saturate(flow.z*1.6))*(1.0+u.climate.y*0.25);
+              float absorb=1.0-exp(-density*(storm?0.83:0.39));
+              float lit=0.35+0.65*saturate(n*0.85+z*0.22);
+              float3 tint=storm ? mix(float3(0.10,0.12,0.16),float3(0.38,0.41,0.46),lit) : mix(color*0.60,color,lit);
+              if(storm)tint+=float3(0.48,0.55,0.72)*u.atmosphere.w;
+              scattering+=transmittance*absorb*tint;transmittance*=1.0-absorb;
+          }
+          float a=(1-transmittance)*alpha;
+          float3 rgb=scattering*alpha;
+          // A soft underside keeps pale smoke readable on white without a hard outline.
+          return float4(rgb,a);
+      }
+  """

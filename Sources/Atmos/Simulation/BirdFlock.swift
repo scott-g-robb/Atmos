@@ -16,6 +16,7 @@ final class BirdFlock {
     var perch: CGWindowID?
     var perchX: Float = 0.5
     var rest: Float = 0
+    var restLimit: Float = 10
     var leaving = false
     var lastSupport: SIMD2<Float>?
     var supportVelocity = SIMD2<Float>.zero
@@ -57,7 +58,7 @@ final class BirdFlock {
         nextFlock = elapsed + 48 + random() * 54
         if !reducedMotion && random() < 0.18 { companionAt = elapsed + 3 + random() * 5 }
       }
-      let direction: Float = wind < -10 ? -1 : 1
+      let direction: Float = abs(wind) > 25 && random()<0.8 ? (wind<0 ? -1:1) : (random()<0.5 ? -1:1)
       let candidates = surfaces.filter {
         !$0.isDock && $0.frame.width > 120 && $0.frame.maxY < CGFloat(size.y - 70)
       }
@@ -66,17 +67,35 @@ final class BirdFlock {
       groupSizes.append(count)
       if groupSizes.count > 32 { groupSizes.removeFirst() }
       let altitude = size.y * (0.42 + random() * 0.34)
+      let landings = reducedMotion ? min(1,count) : random()<0.18 ? 0 : 1+Int(random()*Float(count))
+      // Shuffle the landing subset rather than always choosing the flock leader.
+      var order = Array(0..<count)
+      for i in order.indices.reversed() { order.swapAt(i,Int(random()*Float(i+1))) }
+      let stopping = Set(order.prefix(landings))
       for i in 0..<count {
         let seed = random()
-        let species = (firstSpecies + i) % 4
-        let perch = candidates.isEmpty ? nil : candidates[(i + Int(elapsed)) % candidates.count]
+        let species = i == 0 ? firstSpecies : i == count-1
+          ? (firstSpecies+1+Int(random()*3))%4 : random()<0.72 ? firstSpecies : Int(random()*4)
+        var perch: CGWindowID?
+        var perchX: Float = 0.5
+        if stopping.contains(i), !candidates.isEmpty {
+          for _ in 0..<12 {
+            let support = candidates[Int(random()*Float(candidates.count))]
+            let fraction = 0.12+random()*0.76
+            let x = Float(support.frame.minX)+Float(support.frame.width)*fraction
+            let y = Float(support.frame.maxY)+5
+            let blocked = support.blockers.contains { $0.insetBy(dx:-12,dy:-14).contains(CGPoint(x:CGFloat(x),y:CGFloat(y))) }
+            let occupied = birds.contains { $0.perch == support.id && abs($0.perchX-fraction)*Float(support.frame.width)<38 }
+            if !blocked && !occupied { perch=support.id;perchX=fraction;break }
+          }
+        }
         birds.append(
           Bird(
             position: SIMD2(
               direction > 0 ? -40 - Float(i) * 38 : size.x + 40 + Float(i) * 38,
               altitude + Float(i) * (10 + seed * 14)), velocity: SIMD2(direction * (95 + seed * 20), 0),
             species: species, seed: seed,
-            perch: i == 0 ? perch?.id : nil, perchX: 0.3 + seed * 0.3))
+            perch: perch, perchX: perchX, restLimit: 5+random()*13))
       }
     }
     particles.removeAll(keepingCapacity: true)
@@ -114,7 +133,7 @@ final class BirdFlock {
         target = nil
       }
       if !active || startled || (bird.perch != nil && target == nil)
-        || simd_distance(cursor, bird.position) < 50 || bird.rest > 10
+        || simd_distance(cursor, bird.position) < 50 || bird.rest > bird.restLimit
       {
         bird.leaving = true
         bird.perch = nil

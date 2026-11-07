@@ -6,6 +6,8 @@ final class ScreenSnow {
   let displayID: CGDirectDisplayID
   let window: OverlayWindow
   let dock: DockOverlay
+  let backgroundFog: DockOverlay
+  private var panelFrames: [CGRect] = []
   var simulation: SnowSimulation { renderer.simulation }
   private let view: MTKView
   private let renderer: Renderer
@@ -151,11 +153,20 @@ final class ScreenSnow {
     reflection.enabled = enabled
     reflection.live = Preferences.liveReflections
     tracker.usesSnapshotReflections = enabled && !reflection.live
-    if !enabled {
+    if !enabled && !renderer.hasFog {
       reflection.stop()
       renderer.reflection = nil
       renderer.reflectionFrame = nil
     }
+  }
+
+  func setFogBloom(_ enabled: Bool) {
+    reflection.fogBloomEnabled = enabled
+    if !enabled {
+      renderer.fogBloomTexture = nil
+      if !renderer.hasWater { reflection.stop(); renderer.reflectionFrame = nil }
+    }
+    wake()
   }
 
   var reflectionStatus: String {
@@ -166,6 +177,10 @@ final class ScreenSnow {
   }
 
   var isCapturingReflections: Bool { reflection.isCapturing }
+  func refreshCapturePermission() {
+    guard !reflection.isCapturing else { return }
+    reflection.invalidate(); wake()
+  }
   var reflectionsStoppedByUser: Bool { reflection.stoppedByUser }
 
   var hasContent: Bool {
@@ -200,6 +215,7 @@ final class ScreenSnow {
     reflection = ScreenReflection(device: device, displayID: displayID)
     reflection.enabled = Preferences.screenReflections
     reflection.live = Preferences.liveReflections
+    reflection.fogBloomEnabled = Preferences.fogBloom
     renderer.weather.intensity = Preferences.snowfall
     renderer.weather.accumulates = Preferences.accumulate
     renderer.weather.evaporates = Preferences.meltSnow
@@ -214,6 +230,10 @@ final class ScreenSnow {
     dock.window.behindWindows = Preferences.behindWindows
     dock.window.showsInScreenshots = Preferences.showInScreenshots
     renderer.dockOverlay = dock
+    backgroundFog = DockOverlay(screen: screen, device: device,
+      level: OverlayWindow.desktopLevel, fixedSpace: false)
+    backgroundFog.window.showsInScreenshots = Preferences.showInScreenshots
+    renderer.backgroundFogOverlay = backgroundFog
     view = Self.makeView(device: device, size: screen.frame.size)
     tracker.usesSnapshotReflections = reflection.enabled && !reflection.live
 
@@ -225,7 +245,10 @@ final class ScreenSnow {
       // Behind the windows the snow still settles on them: what lies on a window's top edge is above it, in
       // plain view.
       let onWindows = snowOnWindows()
-      let update = tracker.poll(now: now, eager: NSEvent.pressedMouseButtons != 0)
+      let panels = AtmosPanelPresentation.visibleFrames.map { $0.offsetBy(dx: -self.screen.frame.minX, dy: -self.screen.frame.minY) }
+      if panels != panelFrames { panelFrames = panels; updatePlacement() }
+      let update = tracker.poll(now: now, eager: NSEvent.pressedMouseButtons != 0,
+        frameInterval: renderer.hasFog ? 1/Double(renderer.nativeFrameRate) : 1.0/62)
       let geometryChanged = geometryRevision != tracker.geometryRevision
       if geometryChanged {
         updatePlacement()
@@ -238,18 +261,23 @@ final class ScreenSnow {
         renderer.setCoverFrames(
           tracker.covers.map {
             SIMD4(Float($0.minX), Float($0.minY), Float($0.maxX), Float($0.maxY))
-          })
+          }, ids: tracker.coverIDs)
       }
       return update
     }
     renderer.sceneLight = { [unowned self] now in
       light.update(screen: self.screen, now: now)
-      reflection.preferredFrameRate = renderer.captureFrameRate
+      reflection.preferredFrameRate = tracker.hasDepartingWindows ? renderer.nativeFrameRate : renderer.captureFrameRate
       renderer.reflection = reflection.update(
         screen: self.screen, now: now,
-        active: renderer.hasWater && active && !asleep && !covered,
-        windows: tracker.reflectionWindows)
+        active: (renderer.hasWater || renderer.hasFog) && active && !asleep && !covered,
+        windows: tracker.reflectionWindows, water: renderer.hasWater, fog: renderer.hasFog)
       renderer.reflectionFrame = reflection.displayedFrame
+      renderer.reflectionRect = reflection.waterRect
+      renderer.fogCaptureTime = reflection.displayedFrame?.capturedAt
+      renderer.fogBloomTexture = reflection.bloomTexture
+      renderer.fogWallpaperTexture = reflection.wallpaperTexture
+      renderer.fogBloomRect = reflection.bloomRect
       return (light.light, light.shadowTint, light.rim)
     }
     renderer.prepareReflection = { [unowned self] command in reflection.prepare(into: command) }
@@ -259,6 +287,7 @@ final class ScreenSnow {
       reflection.stop()
       renderer.reflection = nil
       renderer.reflectionFrame = nil
+      renderer.fogBloomTexture = nil
       view.isPaused = true
       renderer.releaseFrames(of: view)
       if self.simulation.snowfall == .off && !hasContent {
@@ -308,6 +337,7 @@ final class ScreenSnow {
     self.screen = screen
     window.setFrame(screen.frame, display: true)
     dock.fit(to: screen)
+    backgroundFog.fit(to: screen)
     Renderer.fitDrawable(of: view)
     renderer.resize(SIMD2(Float(screen.frame.width), Float(screen.frame.height)))
     reflection.invalidate()
@@ -341,12 +371,29 @@ final class ScreenSnow {
       reflection.stop()
       renderer.reflection = nil
       renderer.reflectionFrame = nil
+      renderer.fogBloomTexture = nil
     }
     if !active { renderer.releaseFrames(of: view) }
     guard view.isPaused == active else { return }
     if active { Renderer.fitDrawable(of: view) }
     view.isPaused = !active
     if active { renderer.resetClock() }
+  }
+
+  /// Setup has released all frames. Reintroduce the whole composition gently,
+  /// including a previously formed cloud scene resumed from retirement.
+  func resumeAfterSetup() {
+    guard !covered else { return }
+    let duration: Double = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.2 : 1.4
+    following = false
+    alphaTarget = 1
+    fadeEndsAt = CACurrentMediaTime()+duration
+    for overlay in [window,dock.window,backgroundFog.window] { overlay.alphaValue = 0 }
+    NSAnimationContext.runAnimationGroup { context in
+      context.duration = duration
+      context.timingFunction = CAMediaTimingFunction(name:.easeInEaseOut)
+      for overlay in [window,dock.window,backgroundFog.window] { overlay.animator().alphaValue = 1 }
+    }
   }
 
   private func wake() {
@@ -380,7 +427,7 @@ final class ScreenSnow {
         screen: local, top: top, windows: tracker.applicationWindows, previous: topWindowIDs)
     topWindowIDs = Set(topWindows.keys)
     let occluders =
-      behind || window.behindWindows ? [] : topWindows.sorted { $0.key < $1.key }.map(\.value)
+      (behind || window.behindWindows ? [] : topWindows.sorted { $0.key < $1.key }.map(\.value)) + panelFrames
     if let layer = view.layer {
       occlusionMask.apply(to: layer, bounds: local, excluding: occluders)
     }
@@ -506,6 +553,7 @@ final class ScreenSnow {
     guard !occluded, abs(window.alphaValue - slideAlpha) > 0.002 else { return }
     window.alphaValue = slideAlpha
     dock.window.alphaValue = slideAlpha
+    backgroundFog.window.alphaValue = slideAlpha
   }
 
   // Full-screen wakeup is driven by Space, application and occlusion notifications. No polling timer
@@ -529,6 +577,7 @@ final class ScreenSnow {
         context.duration = duration
         window.animator().alphaValue = target
         dock.window.animator().alphaValue = target
+        backgroundFog.window.animator().alphaValue = target
       }
     }
     finishFade()
@@ -542,9 +591,10 @@ final class ScreenSnow {
     ) { [weak self] in
       guard let self, !following, let target = alphaTarget, CACurrentMediaTime() >= fadeEndsAt
       else { return }
-      if window.alphaValue != target || dock.window.alphaValue != target {
+      if window.alphaValue != target || dock.window.alphaValue != target || backgroundFog.window.alphaValue != target {
         window.alphaValue = target
         dock.window.alphaValue = target
+        backgroundFog.window.alphaValue = target
       }
       guard covered, !leaving, !gone, target == 0 else { return }
       gone = true
@@ -608,6 +658,7 @@ final class ScreenSnow {
     view.delegate = nil
     window.orderOut(nil)
     dock.close()
+    backgroundFog.close()
   }
 
   /// Window bounds come in global coordinates with the origin at the top left of the primary display.

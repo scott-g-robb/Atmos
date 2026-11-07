@@ -33,9 +33,10 @@ final class DockOverlay {
   /// The strip's height; it grows to fit the snow and shrinks back as the snow goes.
   private(set) var height: CGFloat = 1
 
-  init(screen: NSScreen, device: MTLDevice) {
+  init(screen: NSScreen, device: MTLDevice, level: NSWindow.Level = OverlayWindow.belowDockLevel,
+    fixedSpace: Bool = true) {
     screenFrame = screen.frame
-    window = OverlayWindow(screen: screen, level: OverlayWindow.belowDockLevel)
+    window = OverlayWindow(screen: screen, level: level, fixedSpace: fixedSpace)
     layer.device = device
     layer.pixelFormat = .bgra8Unorm
     layer.isOpaque = false

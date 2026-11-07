@@ -41,14 +41,14 @@ final class EffectPolishTests: XCTestCase {
         airflow: nil, cursor: away, active: true, reducedMotion: false)
       if flock.perchedCount > 0 { break }
     }
-    XCTAssertEqual(flock.perchedCount, 1)
+    XCTAssertGreaterThan(flock.perchedCount, 0)
     for _ in 0..<60 {
       window = WindowSurface(id: window.id, frame: window.frame.offsetBy(dx: 0.25, dy: 0),
         blockers: [], cornerRadius: 18, cornerExponent: 2.5, isDock: false)
       flock.step(dt: 1 / 120, size: SIMD2(1000, 700), surfaces: [window], wind: 0,
         airflow: nil, cursor: away, active: true, reducedMotion: false)
     }
-    XCTAssertEqual(flock.perchedCount, 1, "A slow drag carries the resting bird")
+    XCTAssertGreaterThan(flock.perchedCount, 0, "A slow drag carries resting birds")
     window = WindowSurface(id: window.id, frame: window.frame.offsetBy(dx: -65, dy: 0),
       blockers: [], cornerRadius: 18, cornerExponent: 2.5, isDock: false)
     flock.step(dt: 1 / 120, size: SIMD2(1000, 700), surfaces: [window], wind: 0,
