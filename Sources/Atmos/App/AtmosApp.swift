@@ -4,6 +4,14 @@ import AppKit
 enum AtmosApp {
   static func main() {
     let app = NSApplication.shared
+    if CommandLine.arguments.contains("--profile-visible-fog") || CommandLine.arguments.contains("--profile-visible-storm") {
+      app.setActivationPolicy(.prohibited)
+      Task { @MainActor in
+        await CaptureDiagnostics.visibleFog(storm: CommandLine.arguments.contains("--profile-visible-storm"))
+        exit(0)
+      }
+      app.run(); return
+    }
     if CommandLine.arguments.contains("--profile-desktop-capture") {
       app.setActivationPolicy(.prohibited)
       Task { @MainActor in await CaptureDiagnostics.run(); exit(0) }

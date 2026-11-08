@@ -1,4 +1,78 @@
-# Atmos 0.14.2 performance notes
+# Atmos 0.14.3 performance and presentation
+
+The build 70 startup correction clears the linked overlay using the display
+clock's supplied drawable, then pauses. Build 69's manual clear raised
+CAMetalLayerInvalidOperation before the menu was created; the profiling entry
+points bypassed that ordinary welcome path. Startup, empty scenes and pause/wake
+now have separate regression checks, including real display callbacks. This follows
+[Apple's display-link drawable ownership guidance](https://github.com/apple/game-porting-toolkit/blob/main/game-porting-skills/skills/presenting-metal-drawables/references/frame-pacing.md).
+
+The 0.14.3 work changes scheduling and redundant work, not resolution, particle
+counts, simulation frequency or visual-quality settings. CAMetalDisplayLink supplies
+ready drawables at native refresh and keeps the main thread out of MTKView's drawable
+wait. GPU backpressure is checked before input/physics, so a frame that cannot be
+submitted does no redundant work and the next frame integrates elapsed time.
+Native background fog reuses an unchanged
+light field and skips a redundant full-screen intermediate. Window-system snapshots
+are shared, callbacks coalesce, and unsupported optional notifications no longer
+prevent other supported notifications from registering.
+
+A 20-second run of the installed 0.14.2 on this M5 desktop measured 11.36% Atmos CPU,
+18.90% process GPU time and 113 MiB resident memory. This fog/idle sample was not
+the reported heavy lightning/leaves/birds scene and is not a worst-case bound.
+
+The user clarified that Roblox was running on another Stage/Space while Atmos was
+visible on the desktop. Atmos must keep rendering in that case; fullscreen pause
+logic was not changed. A subsequent visible **wet** heavy-lightning, autumn-leaves
+and birds run reproduced high Atmos CPU: 48.06%, with cached screenshot reflections,
+119.93 submissions/s and 2.96 ms simulation per submitted frame. A dry run at 8.39%
+CPU had not exercised that water load. Sampling identified `sh_couple_liquid` as
+the dominant CPU work.
+
+The Rust solver now caches exact live cell coordinates, tracks each sorted bucket's
+processed prefix, and visits remaining sparse neighbours in the original rotated
+order. Independent IEEE divisions use ARM NEON/Intel SSE. Particle counts,
+constraint passes, pair ordering, rendering and interaction rules are preserved.
+The same 7,800-particle input measured 6.151 ms/step in the test-only baseline versus
+4.366 ms after optimisation (29% faster). Regression checks compare position,
+velocity, mass and foam bit for bit across sparse/dense populations and cursor
+contact; both native ARM and Intel/Rosetta checks passed.
+
+A 30-second shipping desktop run after optimisation measured 27.71% CPU, 119.90
+submissions/s and 1.40 ms simulation/frame. Final primary particle counts differed
+(7,618 before versus 3,976 after), so those native runs are **not a controlled
+equal-population speedup**; emission and lightning are stochastic. The isolated
+solver comparison above uses identical inputs. Roblox GPU contention was not
+recreated, and the installed Atmos copy remained active; WindowServer CPU is
+excluded. Dense water remains substantial work and ≤5% CPU across every scene
+has not been established.
+A repeat measured 27.15% CPU, 119.93 submissions/s and 1.35 ms simulation/frame
+(3,040 primary particles at the end). Both native runs closed cleanly without a
+new crash report.
+
+The explicit 0.14.3 visible-fog diagnostic (fog density 0.72, 58% clouds, real desktop
+geometry and screenshot bloom) delivered/presented 2,410 frames in 20.10 seconds:
+119.90 submissions/s on a 120 Hz display, with 9.95% process CPU. The installed old
+copy remained running. This is a successful native-rate desktop run, **not** a
+controlled whole-app before/after comparison.
+A repeat recorded 1,445 submissions in 12.05 seconds (119.87/s), 9.83% CPU and
+60 window-geometry queries (5/s while still). The drag-mask path is pixel-equivalent
+to the Boolean version: its isolated build cost fell from 0.00556 ms to 0.00049 ms
+per update (about 11×). Stage Manager size checks and short-lived Space membership
+metadata also avoid repeated WindowServer lookups during drags; position updates
+still run at native rate. These are component improvements, not a measured bound
+on interactive CPU spikes. Raw reports are under build/verification/fixes69. The new display-link shutdown
+regression and repeated native close were verified after correcting a double
+invalidation caught by the native test.
+
+Visual regressions cover matching live icons, prominent warnings, zero fog under a
+regional alert when local visibility is clear, height-balanced fog with no clouds,
+unchanged cached light fields, refreshed geometry, window motion, screenshot crops,
+registered screenshot content and the existing water projection, and fresh location on normal weather polls while the
+previous reading stays active. Physical Intel/macOS 14 and long interactive stress runs still
+need physical-device validation. No universal CPU/FPS guarantee is established.
+
+## Earlier 0.14.2 measurements
 
 Measured on this Apple M5 workstation with release optimisation. These are component
 measurements, not a promise of 120 fps or ≤5% CPU on every Mac. All visible effects

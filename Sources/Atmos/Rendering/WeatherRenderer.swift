@@ -201,7 +201,6 @@ final class WeatherRenderer {
       viewSize: simulation.size, time: simulation.time,
       opacity: Self.entranceOpacity(age: simulation.elapsed-startedAt, atmospheric: simulation.effect.hasBanks), light: SIMD4(light, 1)
     )
-    if simulation.effect == .mist { uniforms.opacity *= simulation.fogAmount }
     uniforms.cursor = simulation.interaction
     uniforms.screen = SIMD4(
       simulation.size.x, simulation.size.y, min(contentTop, simulation.size.y), 0)
@@ -256,15 +255,23 @@ final class WeatherRenderer {
     simulation.decorations.contains(where: isNativeAtmosphere)
       || ((simulation.effect == .mist || simulation.effect == .clouds) && simulation.particles.contains(where: isNativeAtmosphere))
   }
+  var hasForegroundContent: Bool {
+    if simulation.effect.hasWater { return true }
+    if simulation.effect == .mist { return false }
+    return simulation.particles.contains { !isNativeAtmosphere($0) }
+      || simulation.decorations.contains { !isNativeAtmosphere($0) }
+  }
   func encodeAtmosphere(with encoder: MTLRenderCommandEncoder, includeGround: Bool,
     placement: AtmospherePlacement = .all) {
     guard frames.count == 2 else { return }
     bindSmoke(encoder)
     drawDecorations(encoder: encoder, uniforms: uniforms, ground: includeGround ? nil : false, placement: placement)
+    var particleUniforms = uniforms
+    if simulation.effect == .mist { particleUniforms.opacity *= simulation.fogAmount }
     let volumes = simulation.effect == .mist || simulation.effect == .clouds
     if placement == .nativeBackground && !volumes { return }
     if placement == .all || !volumes {
-      drawSprites(encoder: encoder, uniforms: uniforms, start: 0, count: simulation.particleCount)
+      drawSprites(encoder: encoder, uniforms: particleUniforms, start: 0, count: simulation.particleCount)
       return
     }
     // Batch cloud ranges without copying particle storage or uploading a
@@ -275,7 +282,7 @@ final class WeatherRenderer {
         && (isNativeAtmosphere(simulation.particles[i]) == (placement == .nativeBackground))
       if include && start == nil { start = i }
       if !include, let first = start {
-        drawSprites(encoder: encoder, uniforms: uniforms, start: first, count: i-first,
+        drawSprites(encoder: encoder, uniforms: particleUniforms, start: first, count: i-first,
           nativeOcclusion: placement == .nativeBackground)
         start = nil
       }
@@ -346,6 +353,8 @@ final class WeatherRenderer {
       let isGround = sprite.motion.w == 7 && sprite.life.z == 0
       if let ground, ground != isGround { continue }
       var u = uniforms
+      u.opacity *= Self.decorationOpacity(kind: sprite.motion.w, mist: simulation.effect == .mist,
+        fog: simulation.fogAmount)
       var blockers = [SIMD4<Float>.zero]
       if placement != .nativeBackground, sprite.motion.w == 7,
         let bank = simulation.banks.first(where: { Float($0.id) == sprite.life.z })
@@ -361,6 +370,12 @@ final class WeatherRenderer {
         encoder: encoder, uniforms: u, start: simulation.particleCount + i, count: 1,
         clearBlockers: false, nativeOcclusion: placement == .nativeBackground)
     }
+  }
+
+  static func decorationOpacity(kind: Float, mist: Bool, fog: Float) -> Float {
+    // Sky clouds are independent of visibility. The broad veil already carries
+    // its optical depth in vertex alpha; only billows/banks need the fog factor.
+    mist && kind != 12 && kind != 15 ? fog : 1
   }
 
   private func drawSprites(

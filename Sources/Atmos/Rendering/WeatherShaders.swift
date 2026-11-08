@@ -186,7 +186,7 @@ let weatherShaderSource = """
               float z=(float(sample)+0.5)/6.0;
               float3 pos=float3(advected+float2(z*0.43,z*0.12),z*2.8+in.seed*8);
               float n=volumeNoise(pos);float shape=smoothstep(0.22,0.77,n);
-              float density=shape*envelope*mix(0.18,1.0,saturate(flow.z*1.6))*(1.0+u.climate.y*0.25);
+              float density=shape*envelope*mix(0.18,1.0,saturate(flow.z*1.6))*(cloud?1.0:1.0+u.climate.y*0.25);
               float absorb=1.0-exp(-density*mix(0.39,0.83,shade));
               float lit=0.35+0.65*saturate(n*0.85+z*0.22);
               float3 tint=mix(mix(color*0.60,color,lit),mix(float3(0.10,0.12,0.16),float3(0.38,0.41,0.46),lit),shade);

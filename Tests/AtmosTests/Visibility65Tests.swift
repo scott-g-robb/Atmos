@@ -61,7 +61,7 @@ final class Visibility65Tests: XCTestCase {
     XCTAssertEqual(dense.sunlight, 0)
     XCTAssertEqual(WeatherScene(weather: reading(nil), date: now).fog, 0)
   }
-  func testVisibilityAndAlertsUseOneSmoothFogLayerWithTheStrongerDensity() throws {
+  func testVisibilityControlsTheSingleFogLayerUnderARegionalWarning() throws {
     guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("Metal unavailable") }
     var w = reading(8_000); w.preferredEffect = .rain
     let alert = LocalWeatherAlert(id: "fog", summary: "Yellow warning for fog", source: "Met Office",
@@ -69,8 +69,8 @@ final class Visibility65Tests: XCTestCase {
       effective: now.addingTimeInterval(-3600), expires: now.addingTimeInterval(3600))
     w.alerts = [alert]
     let scene = WeatherScene(weather: w, date: now)
-    XCTAssertEqual(scene.fog, alert.severity.fogDensity)
-    XCTAssertFalse(scene.fogIsVisibilityDriven)
+    XCTAssertLessThan(scene.fog, 0.15)
+    XCTAssertTrue(scene.fogIsVisibilityDriven)
     let renderer = try Renderer(device: device, pixelFormat: .rgba8Unorm,
       simulation: SnowSimulation(width: 960, height: 600, snowfall: .steady))
     renderer.setScene(scene, calm: false)

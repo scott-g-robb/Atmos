@@ -95,6 +95,15 @@ struct WeatherSnapshot: Decodable, Equatable {
   var humidity: Double? = nil
   var cloudCover: Double? = nil
   var apparentTemperature: Double? = nil
+  var highTemperature: Double? = nil
+  var lowTemperature: Double? = nil
+  mutating func setDailyTemperatures(high: Double?, low: Double?) {
+    highTemperature = high.flatMap { $0.isFinite && (-120...80).contains($0) ? $0 : nil }
+    lowTemperature = low.flatMap { $0.isFinite && (-120...80).contains($0) ? $0 : nil }
+    if let highTemperature, let lowTemperature, highTemperature < lowTemperature {
+      self.highTemperature = nil; self.lowTemperature = nil
+    }
+  }
   var reportedCondition: String? = nil
   var preferredEffect: WeatherEffect? = nil
   var precipitationUnit = "mm"
@@ -128,6 +137,7 @@ struct WeatherSnapshot: Decodable, Equatable {
     guard let visibility, visibility.isFinite, visibility >= 0 else { return 0 }
     return Float(min(0.9, max(0, log(16_000 / max(50, visibility)) / log(320) * 0.9)))
   }
+  var hasLocalVisibility: Bool { visibility.map { $0.isFinite && $0 >= 0 } ?? false }
   var visibilityDescription: String? {
     guard let visibility, visibility.isFinite, visibility >= 0 else { return nil }
     return visibility < 1_000 ? "\(Int(visibility.rounded())) m" : String(format: "%.1f km", visibility / 1_000)
@@ -219,6 +229,13 @@ struct WeatherSnapshot: Decodable, Equatable {
 
 enum WeatherAPI {
   struct Response: Decodable { let current: WeatherSnapshot }
+  private struct DailyResponse: Decodable {
+    struct Daily: Decodable {
+      let temperature_2m_max: [Double?]
+      let temperature_2m_min: [Double?]
+    }
+    let daily: Daily
+  }
 
   static func decode(_ data: Data, response: URLResponse, at date: Date = Date()) throws
     -> WeatherSnapshot
@@ -228,7 +245,11 @@ enum WeatherAPI {
     else {
       throw URLError(.badServerResponse)
     }
-    let weather = try JSONDecoder().decode(Response.self, from: data).current
+    var weather = try JSONDecoder().decode(Response.self, from: data).current
+    if let daily = try? JSONDecoder().decode(DailyResponse.self, from: data).daily {
+      weather.setDailyTemperatures(high: daily.temperature_2m_max.first ?? nil,
+        low: daily.temperature_2m_min.first ?? nil)
+    }
     guard weather.isUsable(at: date) else { throw URLError(.cannotParseResponse) }
     return weather
   }
@@ -253,6 +274,8 @@ enum WeatherAPI {
       ),
       .init(name: "wind_speed_unit", value: "kmh"), .init(name: "timeformat", value: "unixtime"),
       .init(name: "forecast_days", value: "1"),
+      .init(name: "daily", value: "temperature_2m_max,temperature_2m_min"),
+      .init(name: "timezone", value: "auto"),
     ]
     return components.url
   }
@@ -289,8 +312,15 @@ struct WeatherScene: Equatable {
       }
     }
     if warningEffects.contains(.mist) {
-      fog = warnings.filter { $0.visualEffect == .mist }.map { $0.severity.fogDensity }.max() ?? 0
-      if !primary.hasWater && primary != .snow && primary != .hail { primary = .mist }
+      let regional = warnings.filter { $0.visualEffect == .mist }.map { $0.severity.fogDensity }.max() ?? 0
+      // A regional advisory is always shown, but local visibility determines
+      // optical density when measured. Clear local visibility means no fog;
+      // agreement permits the alert's modest boost without imposing its density.
+      fog = weather.hasLocalVisibility
+        ? min(0.95, weather.visibilityFogDensity * (1 + regional * 0.15))
+        : regional
+      fogIsVisibilityDriven = weather.hasLocalVisibility
+      if fog > 0, !primary.hasWater && primary != .snow && primary != .hail { primary = .mist }
     }
     if weather.visibilityFogDensity > fog {
       fog = weather.visibilityFogDensity
@@ -299,6 +329,9 @@ struct WeatherScene: Equatable {
     let dynamics = WeatherDynamics(weather: weather)
     self.dynamics = dynamics
     clouds = dynamics.cloudCover
+    if weather.hasLocalVisibility, fog == 0, primary == .mist {
+      primary = clouds > 0.05 ? .clouds : weather.isDay == 1 ? .sunlight : .none
+    }
     sunlight =
       weather.isDay == 1 && fog < 0.45 && ![WeatherEffect.storm, .lightning, .mist].contains(primary)
       ? pow(1 - clouds, 2) * (1 - fog) : 0

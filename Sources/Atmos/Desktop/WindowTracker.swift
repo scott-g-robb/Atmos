@@ -57,6 +57,8 @@ final class WindowTracker {
   private let coverOnlyOwners: Set<String> = ["Dock"]
   private var previous: [WindowSurface] = []
   private var lastQuery: CFTimeInterval = 0
+  private(set) var queryCount = 0
+  private var lastFallbackProbe: CFTimeInterval = -10
   private var changeRevision: UInt64 = .max
   private var lastChange: CFTimeInterval = -10
   /// When an auto-hidden Dock came out; nil while it is away.
@@ -71,6 +73,10 @@ final class WindowTracker {
   /// Windows on their way out before the window list shows it, as during a minimize's genie animation;
   /// left out until they're gone or their time is up.
   private var leaving: [CGWindowID: CFTimeInterval] = [:]
+  private var departures = WindowDepartureState()
+  private var presentationUntil: CFTimeInterval = 0
+  private var queried = false
+  func hasPresentationTransition(now: CFTimeInterval) -> Bool { now < presentationUntil }
   var hasDepartingWindows: Bool { !leaving.isEmpty }
   private var pressedMinimize: CGWindowID?
   private var buttonDown = false
@@ -123,7 +129,7 @@ final class WindowTracker {
     let notified = changeRevision != changes.revision
     guard
       minimizing || now < slidingUntil || interval >= (closely || notified ? frameInterval : 0.2)
-        || (!changes.available && watchedMoved())
+        || (!changes.available && fallbackMoved(now: now))
     else { return nil }
     changeRevision = changes.revision
     #if DEBUG
@@ -144,6 +150,7 @@ final class WindowTracker {
       }
     #endif
     lastQuery = now
+    queryCount += 1
     let before = windowFrames
     let surfaces = query(now: now)
     watched = windowFrames.max {
@@ -256,6 +263,7 @@ final class WindowTracker {
         started = true
       }
     }
+    if started { presentationUntil = max(presentationUntil, now + 0.65) }
     return started
   }
 
@@ -310,6 +318,13 @@ final class WindowTracker {
     guard let watched, let bounds = Self.listedBounds(of: watched.id) else { return false }
     return abs(bounds.minX - screen.minX - watched.frame.minX) > 0.5
       || abs(screen.maxY - bounds.maxY - watched.frame.minY) > 0.5
+  }
+  private func fallbackMoved(now: CFTimeInterval) -> Bool {
+    // Active drags already poll at presentation rate. With no notification
+    // support, probe a still window at most 10 Hz until movement wakes the tracker.
+    guard now - lastFallbackProbe >= 0.1 else { return false }
+    lastFallbackProbe = now
+    return watchedMoved()
   }
 
   /// Where the window list puts one window, in its own coordinates.
@@ -523,6 +538,13 @@ final class WindowTracker {
   private func query(now: CFTimeInterval) -> [WindowSurface] {
     guard screen.width > 0 else { return [] }
     let list = Self.windowList(now: now)
+    if !leaving.isEmpty {
+      let visible = Set(list.compactMap { $0.onScreen != false ? $0.id : nil })
+      for restored in departures.restored(departing: Set(leaving.keys), visible: visible) {
+        leaving.removeValue(forKey: restored)
+        presentationUntil = max(presentationUntil, now + 0.4)
+      }
+    }
     if usesSnapshotReflections {
       reflectionWindows = list.compactMap { entry in
         guard entry.pid != ownPID, let id = entry.id, let bounds = entry.bounds,
@@ -550,6 +572,7 @@ final class WindowTracker {
     fullScreenInView = fullScreenAppHidesDock(in: list)
     fullScreenShare = fullScreenShare(in: list)
     defer {
+      queried = true
       if exposing { reflectionWindows.removeAll(keepingCapacity:true) }
       alphas = fresh
       panelsShownAt = panels
@@ -570,10 +593,24 @@ final class WindowTracker {
         !ignoredOwners.contains(entry.owner ?? "")
       else { continue }
       let id = entry.id ?? 0
+      if queried, layer == 0, id != 0 {
+        if windowFrames[id] == nil {
+          presentationUntil = max(presentationUntil, now + 0.4)
+        } else if let old = windowFrames[id] {
+          // Genie/restore bounds change in both dimensions. This is a
+          // presentation transform, never a physical resize impulse.
+          let widthRatio = bounds.width / max(1, old.width)
+          let heightRatio = bounds.height / max(1, old.height)
+          if (widthRatio < 0.88 && heightRatio < 0.88) || (widthRatio > 1.14 && heightRatio > 1.14) {
+            presentationUntil = max(presentationUntil, now + 0.45)
+          }
+        }
+      }
       fresh[id] = alpha
       if leaving[id] != nil { continue }
       // A window fading out is closing or hiding: its snow falls as the fade begins.
       let fading = alpha < 0.98 && alpha < (alphas[id] ?? 0) - 0.01
+      if fading { presentationUntil = max(presentationUntil, now + 0.3) }
 
       let owner = entry.owner ?? ""
       let shelf = owner == "Dock" && layer == dockLevel
@@ -647,7 +684,7 @@ final class WindowTracker {
     into checked: inout [CGWindowID: (bounds: CGRect, card: Bool)]
   ) -> Bool {
     let card: Bool
-    if let known = cards[id], known.bounds == bounds {
+    if let known = cards[id], known.bounds.size == bounds.size {
       card = known.card
     } else if let real = SkyLight.bounds(of: id) {
       card = bounds.width < real.width * 0.6 && bounds.height < real.height * 0.6
@@ -949,11 +986,22 @@ enum Spaces {
     "SLSCopySpacesForWindows", as: SpacesForWindows.self)
   private static let displaySpaces = SkyLight.function(
     "SLSCopyManagedDisplaySpaces", as: DisplaySpaces.self)
+  private static var displaySnapshot: (at: Double, value: [[String: Any]])?
+  private static var displayUUIDs: [CGDirectDisplayID: String] = [:]
+  private static var memberships = WindowMetadataCache<Set<UInt64>>()
+  static func invalidate() { displaySnapshot = nil; memberships.invalidate() }
+  private static func displays() -> [[String: Any]]? {
+    let now = CACurrentMediaTime()
+    if let displaySnapshot, now - displaySnapshot.at < 0.08 { return displaySnapshot.value }
+    guard let connection = SkyLight.connection,
+      let value = displaySpaces?(connection)?.takeRetainedValue() as? [[String: Any]] else { return nil }
+    displaySnapshot = (now, value)
+    return value
+  }
 
   /// The Space showing on each display.
   static func current() -> Set<UInt64>? {
-    guard let connection = SkyLight.connection,
-      let displays = displaySpaces?(connection)?.takeRetainedValue() as? [[String: Any]]
+    guard let displays = displays()
     else { return nil }
     let spaces = displays.compactMap { ($0["Current Space"] as? [String: Any]).flatMap(id) }
     return spaces.isEmpty ? nil : Set(spaces)
@@ -961,8 +1009,7 @@ enum Spaces {
 
   /// The Spaces of apps in full screen, on every display.
   static func fullScreen() -> Set<UInt64>? {
-    guard let connection = SkyLight.connection,
-      let displays = displaySpaces?(connection)?.takeRetainedValue() as? [[String: Any]]
+    guard let displays = displays()
     else { return nil }
     // Type 4 is a full-screen app's Space; a desktop is type 0.
     let spaces = displays.flatMap { $0["Spaces"] as? [[String: Any]] ?? [] }
@@ -971,12 +1018,12 @@ enum Spaces {
 
   /// The Spaces of apps in full screen on a display, and whether one of them is showing.
   static func fullScreen(on display: CGDirectDisplayID) -> (spaces: Set<UInt64>, showing: Bool)? {
-    guard let connection = SkyLight.connection,
-      let displays = displaySpaces?(connection)?.takeRetainedValue() as? [[String: Any]]
+    guard let displays = displays()
     else { return nil }
-    let uuid = CGDisplayCreateUUIDFromDisplayID(display).map {
-      CFUUIDCreateString(nil, $0.takeRetainedValue()) as String
+    if displayUUIDs[display] == nil, let uuid = CGDisplayCreateUUIDFromDisplayID(display) {
+      displayUUIDs[display] = CFUUIDCreateString(nil, uuid.takeRetainedValue()) as String
     }
+    let uuid = displayUUIDs[display]
     // Without separate Spaces for each display there is one entry, "Main", for them all.
     guard
       let entry = displays.first(where: { $0["Display Identifier"] as? String == uuid })
@@ -990,6 +1037,9 @@ enum Spaces {
   }
 
   static func of(_ window: CGWindowID) -> Set<UInt64>? {
+    memberships.value(for: window, now: CACurrentMediaTime()) { readMembership(of: window) }
+  }
+  private static func readMembership(of window: CGWindowID) -> Set<UInt64>? {
     // 7 asks for the window's Spaces of every kind.
     guard let connection = SkyLight.connection,
       let spaces = spacesForWindows?(connection, 7, [NSNumber(value: window)] as CFArray)?

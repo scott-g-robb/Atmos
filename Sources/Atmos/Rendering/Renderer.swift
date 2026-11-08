@@ -68,7 +68,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     (CFTimeInterval) -> (
       light: SIMD3<Float>, shadowTint: SIMD4<Float>, rim: SIMD4<Float>
     ) = { _ in (SIMD3(repeating: 1), .zero, .zero) }
-  var prepareReflection: (MTLCommandBuffer) -> Void = { _ in }
+  var prepareReflection: (MTLCommandBuffer) -> Double? = { _ in nil }
   var nativeFrameRate = 60
   var budget = PowerBudget.full
   private let activity = FrameActivity()
@@ -135,8 +135,12 @@ final class Renderer: NSObject, MTKViewDelegate {
   private let device: MTLDevice
   private let queue: MTLCommandQueue
   private let format: MTLPixelFormat
-  private let semaphore = DispatchSemaphore(value: 2)
+  private let semaphore: DispatchSemaphore
   private var lastTime: CFTimeInterval = 0
+  private let profiling = CommandLine.arguments.contains("--profile-visible-storm") || CommandLine.arguments.contains("--profile-visible-fog")
+  private(set) var profileInput: Double = 0
+  private(set) var profileSimulation: Double = 0
+  private(set) var profileEncode: Double = 0
   private var lastWindows: WindowUpdate?
   private var dockDrawn = false
   private var ambient: (light: SIMD3<Float>, shadowTint: SIMD4<Float>, rim: SIMD4<Float>) = (
@@ -145,10 +149,12 @@ final class Renderer: NSObject, MTKViewDelegate {
   private var pointer = SIMD2<Float>(-10_000, -10_000)
   private let epoch = CACurrentMediaTime()
 
-  init(device: MTLDevice, pixelFormat: MTLPixelFormat, simulation: SnowSimulation) throws {
+  init(device: MTLDevice, pixelFormat: MTLPixelFormat, simulation: SnowSimulation,
+    inFlight: DispatchSemaphore = DispatchSemaphore(value: 2)) throws {
     guard let queue = device.makeCommandQueue() else { throw RendererError.unavailable }
     self.device = device
     self.queue = queue
+    semaphore = inFlight
     format = pixelFormat
     current = try EffectScene(
       effect: .snow, device: device, queue: queue, format: pixelFormat, simulation: simulation)
@@ -351,32 +357,26 @@ final class Renderer: NSObject, MTKViewDelegate {
   }
   func releaseFrames(of view: MTKView) {
     fogBloom?.reset()
-    guard view.drawableSize != CGSize(width: 1, height: 1) else { return }
-    Self.resize(view, to: CGSize(width: 1, height: 1))
     for scene in scenes {
       scene.weather.releaseBuffers()
       scene.snow.releaseBuffers()
     }
-    clear(view)
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak view] in
-      guard let self, let view, view.drawableSize == CGSize(width: 1, height: 1) else { return }
-      clear(view)
-    }
   }
-  private func clear(_ view: MTKView) {
+  /// A linked layer must only use drawables delivered by its display clock,
+  /// including the final transparent frame before setup, sleep or rest.
+  func clearForPause(in view: MTKView, drawable: CAMetalDrawable) {
     guard let command = queue.makeCommandBuffer() else { return }
-    if let drawable = (view.layer as? CAMetalLayer)?.nextDrawable() {
-      let pass = MTLRenderPassDescriptor()
-      pass.colorAttachments[0].texture = drawable.texture
-      pass.colorAttachments[0].loadAction = .clear
-      pass.colorAttachments[0].storeAction = .store
-      pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-      command.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
-      command.present(drawable)
-    }
+    let pass = MTLRenderPassDescriptor()
+    pass.colorAttachments[0].texture = drawable.texture
+    pass.colorAttachments[0].loadAction = .clear
+    pass.colorAttachments[0].storeAction = .store
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+    command.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
     clearDock(into: command)
     clearBackground(into: command)
+    command.present(drawable)
     command.commit()
+    Self.resize(view, to: CGSize(width: 1, height: 1))
   }
   private func clearBackground(into command: MTLCommandBuffer) {
     guard backgroundDrawn, let frame = backgroundFogOverlay?.emptyFrame(),
@@ -393,6 +393,16 @@ final class Renderer: NSObject, MTKViewDelegate {
   }
 
   func draw(in view: MTKView) {
+    draw(in: view, providedDrawable: nil)
+  }
+
+  @discardableResult func draw(in view: MTKView, providedDrawable: CAMetalDrawable?) -> Bool {
+    // If another app is occupying the GPU, do not run capture/input/physics for
+    // a frame that cannot be submitted. The next drawable integrates elapsed
+    // time and the swept cursor normally; AppKit never waits on the GPU.
+    guard semaphore.wait(timeout: .now()) == .success else { return false }
+    var submitted = false
+    defer { if !submitted { semaphore.signal() } }
     #if DEBUG
       if DebugMetrics.enabled { DebugMetrics.frames += 1 }
     #endif
@@ -407,6 +417,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     pointer = cursorLocation()
     activity.observeCursor(pointer, size: SIMD2(simulation.width, simulation.height), now: now)
     ambient = sceneLight(now)
+    let profileInputEnd = profiling ? CACurrentMediaTime() : 0
+    if profiling { profileInput += profileInputEnd - now }
     #if DEBUG
       measured = DebugMetrics.end("capture_input", since: measured)
     #endif
@@ -424,23 +436,33 @@ final class Renderer: NSObject, MTKViewDelegate {
     let dt = lastTime > 0 ? Float(min(now - lastTime, 0.05)) : 1 / Float(nativeFrameRate)
     lastTime = now
     step(dt: dt, cursor: pointer, now: now)
+    let profileSimulationEnd = profiling ? CACurrentMediaTime() : 0
+    if profiling { profileSimulation += profileSimulationEnd - profileInputEnd }
     if current.isEmpty && retiring.isEmpty && overlays.allSatisfy(\.isEmpty) {
       rest()
-      return
+      return false
     }
     #if DEBUG
       measured = DebugMetrics.end("simulation", since: measured)
     #endif
-    semaphore.wait()
     guard let command = queue.makeCommandBuffer() else {
-      semaphore.signal()
-      return
+      return false
     }
-    guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable else {
-      semaphore.signal()
-      return
+    let pass: MTLRenderPassDescriptor, drawable: CAMetalDrawable
+    if let providedDrawable {
+      drawable = providedDrawable
+      pass = MTLRenderPassDescriptor()
+      pass.colorAttachments[0].texture = drawable.texture
+      pass.colorAttachments[0].loadAction = .clear
+      pass.colorAttachments[0].storeAction = .store
+      pass.colorAttachments[0].clearColor = view.clearColor
+    } else {
+      guard let nextPass = view.currentRenderPassDescriptor, let nextDrawable = view.currentDrawable else {
+        return false
+      }
+      pass = nextPass; drawable = nextDrawable
     }
-    prepareReflection(command)
+    if let stamp = prepareReflection(command) { fogCaptureTime = stamp }
     encode(
       into: command, pass: pass, scale: Float(view.drawableSize.width / max(1, view.bounds.width)),
       time: Float((now - epoch).truncatingRemainder(dividingBy: 1000)))
@@ -451,10 +473,13 @@ final class Renderer: NSObject, MTKViewDelegate {
       #endif
       semaphore.signal()
     }
+    submitted = true
     command.commit()
+    if profiling { profileEncode += CACurrentMediaTime() - profileSimulationEnd }
     #if DEBUG
       _ = DebugMetrics.end("encode_submit", since: measured)
     #endif
+    return true
   }
 
   /// Shared native-rate step, also used for isolated simulation and rendering measurements.
@@ -511,14 +536,17 @@ final class Renderer: NSObject, MTKViewDelegate {
     for scene in layers { scene.weather.prepare(light: ambient.light, command: command) }
     var scenePass = pass
     var blooming = false
+    let needsScene = !separatesBackground || layers.contains {
+      $0.weather.hasForegroundContent || $0.snow.simulation.spriteCount > 0 || $0.snow.simulation.hasSnow
+    }
     if hasFog, fogBloomTexture != nil, !bloomUnavailable,
       let target = pass.colorAttachments[0].texture {
       if fogBloom == nil {
         do { fogBloom = try FogBloom(device: device, format: format) }
         catch { bloomUnavailable = true }
       }
-      if let intermediate = fogBloom?.scenePass(for: target) {
-        scenePass = intermediate
+      if let intermediate = fogBloom?.scenePass(for: target, includesScene: needsScene) {
+        if needsScene { scenePass = intermediate }
         blooming = true
       }
     } else {
@@ -547,8 +575,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     if blooming, let fogBloom, let fogBloomTexture {
       fogBloom.prepare(desktop: fogBloomTexture, rect: fogBloomRect,
         size: SIMD2(simulation.width, simulation.height), windows: coverFrames, command: command,
-        wallpaper: fogWallpaperTexture, windowIDs: coverIDs, capturedAt: fogCaptureTime)
-      if let output = command.makeRenderCommandEncoder(descriptor: pass) {
+        wallpaper: fogWallpaperTexture, windowIDs: coverIDs, capturedAt: fogCaptureTime,
+        geometrySynchronized: true)
+      if needsScene, let output = command.makeRenderCommandEncoder(descriptor: pass) {
         if let target = pass.colorAttachments[0].texture {
           clip(output, width: target.width, height: target.height)
         }

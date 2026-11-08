@@ -442,6 +442,24 @@
 			<key>fileRef</key>
 			<string>71A62956CC719FA560FAB9F0</string>
 		</dict>
+		<key>4AD78741B0E8C4DE82A0B8F6</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXFileReference</string>
+			<key>lastKnownFileType</key>
+			<string>sourcecode.swift</string>
+			<key>path</key>
+			<string>Sources/Atmos/Desktop/WindowMetadataCache.swift</string>
+			<key>sourceTree</key>
+			<string>SOURCE_ROOT</string>
+		</dict>
+		<key>ACAC854307EBF8C8DBF427C0</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXBuildFile</string>
+			<key>fileRef</key>
+			<string>4AD78741B0E8C4DE82A0B8F6</string>
+		</dict>
 		<key>68200D9424757645CB94CC8D</key>
 		<dict>
 			<key>isa</key>
@@ -567,6 +585,24 @@
 			<string>PBXBuildFile</string>
 			<key>fileRef</key>
 			<string>835F9D5EAB97EDA31A84BD19</string>
+		</dict>
+		<key>157F4314FB8E18B46899EFCF</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXFileReference</string>
+			<key>lastKnownFileType</key>
+			<string>sourcecode.swift</string>
+			<key>path</key>
+			<string>Sources/Atmos/Rendering/NativeFrameClock.swift</string>
+			<key>sourceTree</key>
+			<string>SOURCE_ROOT</string>
+		</dict>
+		<key>A4D005111D031C548DFFB478</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXBuildFile</string>
+			<key>fileRef</key>
+			<string>157F4314FB8E18B46899EFCF</string>
 		</dict>
 		<key>50E4A63CD11D36A540498663</key>
 		<dict>
@@ -927,6 +963,24 @@
 			<string>PBXBuildFile</string>
 			<key>fileRef</key>
 			<string>FA70982EC6166E32852F8C9C</string>
+		</dict>
+		<key>7243FD8C8A1B0D456E7F9D48</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXFileReference</string>
+			<key>lastKnownFileType</key>
+			<string>sourcecode.swift</string>
+			<key>path</key>
+			<string>Sources/Atmos/UI/Personalisation.swift</string>
+			<key>sourceTree</key>
+			<string>SOURCE_ROOT</string>
+		</dict>
+		<key>D035F0C2F6FA3CA224C0015E</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXBuildFile</string>
+			<key>fileRef</key>
+			<string>7243FD8C8A1B0D456E7F9D48</string>
 		</dict>
 		<key>A6D1363F35BAA8D06E2C050A</key>
 		<dict>
@@ -1342,6 +1396,7 @@
 				<string>51A1E700E6BD1BAC75281403</string>
 				<string>EA83135E64E7657AD81AA68D</string>
 				<string>71A62956CC719FA560FAB9F0</string>
+				<string>4AD78741B0E8C4DE82A0B8F6</string>
 				<string>68200D9424757645CB94CC8D</string>
 				<string>9F916E6102E3641CC2EA8ED6</string>
 				<string>5D46356198B6A875AF2D6E64</string>
@@ -1349,6 +1404,7 @@
 				<string>5F5CC668103CE5CF8DC37C18</string>
 				<string>09D8A53AF86AC895A1A1CDBC</string>
 				<string>835F9D5EAB97EDA31A84BD19</string>
+				<string>157F4314FB8E18B46899EFCF</string>
 				<string>50E4A63CD11D36A540498663</string>
 				<string>15551D0FD920ACAFD900D3E6</string>
 				<string>005E77956F88D7A928E1AC40</string>
@@ -1369,6 +1425,7 @@
 				<string>689689D741C6B6D188B36F17</string>
 				<string>532F61CDB487DB26F5F3F73C</string>
 				<string>FA70982EC6166E32852F8C9C</string>
+				<string>7243FD8C8A1B0D456E7F9D48</string>
 				<string>A6D1363F35BAA8D06E2C050A</string>
 				<string>D2C9FD6DFEAE7C1756946F85</string>
 				<string>5EFE92D9FE0555E3EF9DFB61</string>
@@ -1450,6 +1507,7 @@
 				<string>7A7858F828B39B3285BDA0F4</string>
 				<string>C0A70E3883BE4259DE1A7F05</string>
 				<string>D1E6102B620DDEED778CDE7F</string>
+				<string>ACAC854307EBF8C8DBF427C0</string>
 				<string>2F464239B90925004BFA077D</string>
 				<string>923AF6C1254181B0E4F61B03</string>
 				<string>7F4C1204CFF9DF8833A38302</string>
@@ -1457,6 +1515,7 @@
 				<string>F24598BFD82D62B59364FDAA</string>
 				<string>A09B8ECB5F186DE6EBF820A8</string>
 				<string>99A0FB0F5927F9543FF3B686</string>
+				<string>A4D005111D031C548DFFB478</string>
 				<string>17111FF3779DAEFA0A3E7A2F</string>
 				<string>108514B99105C1DC4054D298</string>
 				<string>D61B478360FE5B1B59AC3ECC</string>
@@ -1477,6 +1536,7 @@
 				<string>3DF4968BF5254BB71AE0F59D</string>
 				<string>B3E36A7A89C6CA367C83167B</string>
 				<string>547AAB12A6E17BC6AC21E026</string>
+				<string>D035F0C2F6FA3CA224C0015E</string>
 				<string>EAA537EE0F01505E50D3AD15</string>
 				<string>F8C69762214B14EAC7E22155</string>
 				<string>1E16E4C7C58CC39EEF7B2ECB</string>

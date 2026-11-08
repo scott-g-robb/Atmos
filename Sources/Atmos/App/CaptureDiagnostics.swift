@@ -5,6 +5,40 @@ import Metal
 /// Explicit, opt-in profiling only. No images, window names or coordinates are
 /// written to disk. Uses the production capture path with existing permission.
 enum CaptureDiagnostics {
+  /// Explicit desktop test of the shipping display link, geometry and fog path.
+  /// No preferences, location or updater state are changed by this diagnostic.
+  @MainActor static func visibleFog(storm: Bool = false) async {
+    guard let screen = NSScreen.main, let device = MTLCreateSystemDefaultDevice(),
+      let overlay = ScreenSnow(screen: screen, device: device, snowOnWindows: { true }) else { return }
+    var scene = WeatherScene(primary: storm ? .lightning : .mist,
+      stacked: storm ? .leaves : nil, wildlife: storm ? .birds : nil)
+    scene.fog = storm ? 0 : 0.72; scene.manualCloudCover = storm ? 1 : 0.58; scene.clouds = storm ? 1 : 0.58
+    overlay.setScene(scene); overlay.setFogBloom(true); overlay.setActive(true, asleep:false)
+    if storm {
+      overlay.setIntensity(.heavy); overlay.setAccumulation(true)
+      overlay.setEvaporation(true); overlay.setReflections(true)
+    }
+    overlay.resumeAfterSetup()
+    try? await Task.sleep(nanoseconds: storm ? 8_000_000_000 : 3_000_000_000)
+    let start = CACurrentMediaTime(), cpu = cpuTime(), initial = overlay.frameCounts
+    let timings = overlay.profileTimings
+    let duration = min(60, max(12, Double(ProcessInfo.processInfo.environment["ATMOS_PROFILE_SECONDS"] ?? "20") ?? 20))
+    try? await Task.sleep(nanoseconds: UInt64(duration * 1e9))
+    let elapsed = CACurrentMediaTime() - start, counts = overlay.frameCounts
+    emit(["duration_seconds":elapsed, "process_cpu_percent":(cpuTime()-cpu)/elapsed*100,
+      "delivered_frames":counts.delivered-initial.delivered,"presented_frames":counts.presented-initial.presented,
+      "frames_per_second":Double(counts.presented-initial.presented)/elapsed,
+      "geometry_queries":counts.geometryQueries-initial.geometryQueries,
+      "simulation_ms_per_frame":(overlay.profileTimings.simulation-timings.simulation)/Double(max(1,counts.presented-initial.presented))*1000,
+      "input_ms_per_frame":(overlay.profileTimings.input-timings.input)/Double(max(1,counts.presented-initial.presented))*1000,
+      "encode_ms_per_frame":(overlay.profileTimings.encode-timings.encode)/Double(max(1,counts.presented-initial.presented))*1000,
+      "weather_particles":overlay.profileTimings.particles,
+      "maximum_water_depth_points":overlay.profileWaterDepth,
+      "native_refresh_hz":screen.maximumFramesPerSecond,"reflection_status":overlay.reflectionStatus,
+      "scene":storm ? "heavy lightning + autumn leaves + birds; water reflections" : "fog 0.72; cloud cover 58%; native desktop geometry and screenshot bloom",
+      "scope":"production visible overlays, simulation, rendering and capture; WindowServer CPU excluded"])
+    overlay.close()
+  }
   @MainActor static func run() async {
     var result: [String: Any] = ["os": ProcessInfo.processInfo.operatingSystemVersionString]
     guard CGPreflightScreenCaptureAccess(), let screen = NSScreen.main,
@@ -58,6 +92,6 @@ enum CaptureDiagnostics {
     return Double(usage.ru_utime.tv_sec+usage.ru_stime.tv_sec)+Double(usage.ru_utime.tv_usec+usage.ru_stime.tv_usec)/1e6
   }
   private static func emit(_ result: [String: Any]) {
-    if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]), let text = String(data: data, encoding: .utf8) { print(text) }
+    if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]), let text = String(data: data, encoding: .utf8) { print(text); fflush(stdout) }
   }
 }

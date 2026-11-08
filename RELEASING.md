@@ -80,7 +80,7 @@ and a `notarytool` Keychain profile. The default profile name is `atmos`.
 
 ```sh
 xcrun notarytool store-credentials atmos
-./release.sh 0.14.2 "Release notes"
+./release.sh 0.14.3 "Release notes"
 ```
 
 The script tests and builds both architectures, notarizes and staples the app,
@@ -159,7 +159,7 @@ must project a horizontal orbit around the stem, never a flat screen-plane pinwh
 Check diagonal window throws for both velocity components, cohesive blobs and thin
 ligaments during fast cursor strokes, and sharp foam bubbles fading within a second.
 All six floating drift styles must share splash momentum. Maple rotor inclination
-and lean must vary between individual seeds. The current release is 0.14.2 (build 68).
+and lean must vary between individual seeds. The current release is 0.14.3 (build 72).
 Keep the previous stable 0.14.0 artifacts; discard superseded experimental packages.
 
 For build 50, check flotation on the landing frame and after water rises beneath
@@ -551,10 +551,95 @@ paths; verify its hash against the canonical resource in the signed app and DMG.
 It plays once when the welcome opens, fading out if setup finishes early; ordinary
 launches without welcome and silent auto updates do not play it.
 
-The current verification set has 242 Swift and 13 Rust tests, including optional
+The 0.14.2 verification set had 242 Swift and 13 Rust tests, including optional
 profiles/renders and the live GitHub release download check. See docs/PERFORMANCE.md
 for measured before/after scope and limitations. The separate capture diagnostic
 requires an existing macOS screenshot grant; launch the signed app through macOS
 so permission attribution matches normal use. Never bypass TCC or promise
 indicator suppression. Physical Intel/macOS 14 and multi-display checks remain
 necessary; a universal build alone is not device validation.
+
+
+## 0.14.3 native presentation checks
+
+The primary MTKView uses CAMetalDisplayLink on macOS 14+, with a ready drawable and
+nonblocking GPU backpressure. Auxiliary layers have three drawables so WindowServer
+can retain its current image without stalling the UI. Pause, wake, display changes
+and close stop/invalidate the clock; invalidation is explicitly idempotent (native
+macOS 27 testing caught a crash on a second invalidate). No resolution or quality
+reduction is used for this change. Native refresh remains requested, including 120 Hz.
+
+Fog behind native windows can reuse an unchanged bloom field and a 1×1 transparent
+foreground input. Changing pixels, geometry or emitting foreground effects invalidates
+that result. Screenshot compositing and fog now share the same geometry timestamp;
+old stream-latency exclusion rectangles are not carried into the screenshot path.
+Minimise/restore presentation transforms temporarily use native occlusion rather than
+moving a rectangular mask through the system animation.
+
+Check warning visibility on the main page, clear local visibility under an active
+regional alert, light haze versus dense fog, the upper fog veil with no clouds,
+registered reflections, open/minimise/restore, native 120 Hz pacing and responsive
+menus. Every normal weather poll renews location; failed lookups retain the previous
+scene until the existing bounded retry policy succeeds or disables live weather.
+--profile-visible-fog and --profile-visible-storm run explicit visible desktop
+diagnostics without changing preferences, location or updater state. Their timing
+scope excludes WindowServer CPU. The storm diagnostic enables heavy lightning,
+leaves, birds, accumulation and screenshot reflections.
+
+Window masks use reversed winding for fully contained, disjoint rounded holes;
+overlapping or cropped windows retain Boolean subtraction. Dense pixel-grid tests
+prove equivalence. Space membership metadata is cached for 80 ms, while positions
+remain live; a pure translation reuses the Stage Manager size check. The native
+profile reports geometry-query counts. Quick restore clears a departure as soon as
+the window returns, rather than waiting out the minimise grace period. A new halo
+starts at its measured colour so its first drag does not brighten a half-lit cache.
+
+Liquid buckets track their processed prefix and cache live cell coordinates;
+sparse probes retain their original rotated order. ARM NEON and Intel SSE use
+packed IEEE division for independent pair quantities. A test-only baseline checks
+positions, velocities, mass and foam bit for bit across sparse/dense populations
+and moving cursor contact. No particle or constraint-pass reduction is used.
+GPU backpressure is checked before desktop queries/physics, so an unpresentable
+frame does no redundant simulation; the next frame integrates elapsed time.
+
+The linked primary layer must never call nextDrawable directly, even to clear it
+while paused. A pause requests one transparent frame from the display link, then
+stops the physical clock and shrinks the drawable pool. A wake discards stale
+prefetched sizes. The synchronous setup-pause regression covers the exception that
+previously left a running process without UI. Set ATMOS_TEST_NATIVE_LIFECYCLE=1
+to exercise repeated visible clear/pause/wake with real display-link callbacks.
+Always also launch normally and verify both welcome and the status icon; profiling
+entry points bypass AppDelegate startup and cannot establish launch correctness.
+
+Build 70 verification: 255 Swift tests and 14 Rust tests passed with no skips,
+including the opt-in native lifecycle, profiles and GitHub checks. See
+build/verification/startup70 for startup checks and build/verification/fixes69
+for the earlier isolated performance comparisons.
+
+Build 71 verification: 260 Swift tests and 14 Rust tests passed without skips,
+including local-day forecast decoding, unit conversions, menu-bar style selection,
+native pause/wake and rendered menu pages. The weather card places High, Feels like
+and Low in equally spaced columns. Menu Bar Style defaults to Simple; Compact
+uses feels-like temperature and condition, and Full includes all temperatures.
+All displays use the selected units; missing forecast values remain unavailable.
+Native release verification also requires a successful Apple daily forecast.
+Artifacts and rendered menus are under build/verification/weather71.
+The welcome schedules prepared audio and Core Animation against one future host
+time. The supplied audio crests around 2.5 seconds: the surface forms over 2.6
+seconds and settles over 3.4 without overshoot. Text resolves through that rise;
+controls arrive together. Early navigation cancels entrance masks/animations
+immediately, while Reduce Motion retains a short opacity-only arrival.
+
+Build 72 adds the optional customisation page after permissions, before the menu
+guide. Leaving permissions still prepares weather immediately; rendering remains
+paused throughout customisation. Back navigation, early menu clicks and the final
+activation are covered. Appearance/accent apply to Atmos panels, while individual
+temperature/wind/rainfall/visibility overrides affect UI conversions only. Settings
+has Personalisation, Weather & Desktop, Privacy & Permissions, and App & Updates.
+Compact now uses actual temperature; Full uses feels-like temperature and condition.
+Sky clouds bypass fog opacity, and the broad mist veil carries its density once.
+A GPU regression checks visible 50% cloud cover with 12.4 km visibility and a light
+haze renderer. The original cloud-volume reference checks remain intact.
+Blue is the default accent; six solid colour swatches are offered, with no rainbow
+or system-accent option. Match System applies only to light/dark appearance.
+265 Swift and 14 Rust tests passed without skips. Artifacts: build/verification/personal72.

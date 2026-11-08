@@ -28,11 +28,13 @@ final class WindowReflections {
     let size: CGSize
     let at: CFTimeInterval
     let buffer: CVPixelBuffer
-    init(texture: MTLTexture, size: CGSize, at: CFTimeInterval, buffer: CVPixelBuffer) {
+    let uvRect: SIMD4<Float>
+    init(texture: MTLTexture, size: CGSize, at: CFTimeInterval, buffer: CVPixelBuffer, uvRect: SIMD4<Float>) {
       self.texture = texture
       self.size = size
       self.at = at
       self.buffer = buffer
+      self.uvRect = uvRect
     }
   }
   private var images: [CGWindowID: Image] = [:]
@@ -253,7 +255,7 @@ final class WindowReflections {
               configuration: config)
             guard generation == token, !Task.isCancelled else { return }
             if let buffer = CMSampleBufferGetImageBuffer(sample),
-              let image = image(from: buffer, size: size, at: now)
+              let image = image(from: buffer, size: size, at: now, uvRect: ReflectionGeometry.uvRect(sample: sample))
             {
               if let desktop { previousDesktop = (desktop, clock) }
               desktop = image
@@ -273,6 +275,7 @@ final class WindowReflections {
                 Int(min(CGFloat(height), request.frame.height * CGFloat(height) / size.height * cacheScale))),
               source: request.frame.size)
             let buffer: CVPixelBuffer?
+            var uvRect = SIMD4<Float>(0,0,1,1)
             if let snapshotProvider {
               buffer = try await snapshotProvider(
                 request.id, CGSize(width: config.width, height: config.height))
@@ -284,13 +287,18 @@ final class WindowReflections {
                 missing[request.id] = now
                 continue
               }
+              // A desktop-independent filter already crops to its window. A
+              // display-space source rectangle can add transparent gutters or
+              // crop a differently scaled backing store on Retina displays.
+              config.sourceRect = .zero
               let sample = try await SCScreenshotManager.captureSampleBuffer(
                 contentFilter: SCContentFilter(desktopIndependentWindow: window),
                 configuration: config)
               buffer = CMSampleBufferGetImageBuffer(sample)
+              uvRect = ReflectionGeometry.uvRect(sample: sample)
             }
             guard generation == token, !Task.isCancelled else { return }
-            guard let buffer, let image = image(from: buffer, size: request.frame.size, at: now) else {
+            guard let buffer, let image = image(from: buffer, size: request.frame.size, at: now, uvRect: uvRect) else {
               missing[request.id] = now
               continue
             }
@@ -346,6 +354,8 @@ final class WindowReflections {
       if let base = waterOnly ? self.background : background {
         let previous = waterOnly ? nil : previousDesktop
         draw(base, previous: previous?.image.texture,
+          uvRect: waterOnly ? SIMD4(0,0,1,1) : desktop?.uvRect ?? SIMD4(0,0,1,1),
+          previousRect: previous?.image.uvRect ?? SIMD4(0,0,1,1),
           blend: previous.map { Float(min(1, max(0, (now-$0.at)/0.15))) } ?? 1,
           frame: CGRect(origin: .zero, size: size), alpha: 1, encoder: encoder)
       }
@@ -353,6 +363,7 @@ final class WindowReflections {
         guard let image = images[window.id] else { continue }
         let previous = previousImages[window.id]
         draw(image.texture, previous: previous?.image.texture,
+          uvRect: image.uvRect, previousRect: previous?.image.uvRect ?? image.uvRect,
           blend: previous.map { Float(min(1, max(0, (now-$0.at)/0.15))) } ?? 1,
           frame: window.frame, alpha: window.alpha, encoder: encoder)
       }
@@ -367,7 +378,8 @@ final class WindowReflections {
   }
 
   private func draw(
-    _ texture: MTLTexture, previous: MTLTexture? = nil, blend: Float = 1,
+    _ texture: MTLTexture, previous: MTLTexture? = nil,
+    uvRect: SIMD4<Float> = SIMD4(0,0,1,1), previousRect: SIMD4<Float> = SIMD4(0,0,1,1), blend: Float = 1,
     frame: CGRect, alpha: Float, encoder: MTLRenderCommandEncoder
   ) {
     var rect = SIMD4<Float>(
@@ -381,6 +393,8 @@ final class WindowReflections {
     }
     encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
     encoder.setFragmentBytes(&opacity, length: MemoryLayout<SIMD2<Float>>.stride, index: 0)
+    let sampling = [uvRect, previousRect]
+    sampling.withUnsafeBytes { encoder.setFragmentBytes($0.baseAddress!, length: 32, index: 1) }
     encoder.setFragmentTexture(texture, index: 0)
     encoder.setFragmentTexture(previous ?? texture, index: 1)
     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -428,7 +442,8 @@ final class WindowReflections {
     return config
   }
 
-  private func image(from buffer: CVPixelBuffer, size: CGSize, at: Double) -> Image? {
+  private func image(from buffer: CVPixelBuffer, size: CGSize, at: Double,
+    uvRect: SIMD4<Float> = SIMD4(0,0,1,1)) -> Image? {
     guard let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() else { return nil }
     let descriptor = MTLTextureDescriptor.texture2DDescriptor(
       pixelFormat: .bgra8Unorm, width: CVPixelBufferGetWidth(buffer),
@@ -437,7 +452,7 @@ final class WindowReflections {
     descriptor.storageMode = .shared
     guard let texture = device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0)
     else { return nil }
-    return Image(texture: texture, size: size, at: at, buffer: buffer)
+    return Image(texture: texture, size: size, at: at, buffer: buffer, uvRect: uvRect)
   }
 
   private static let shaders = """
@@ -448,13 +463,13 @@ final class WindowReflections {
         float2 uv=float2(id&1,id>>1);float2 point=rect.xy+uv*rect.zw;
         SnapshotOut out;out.position=float4(point.x*2-1,1-point.y*2,0,1);out.uv=uv;return out;
     }
-    fragment float4 snapshotFragment(SnapshotOut in [[stage_in]],texture2d<float> image [[texture(0)]],constant float2 &opacity [[buffer(0)]]) {
+    fragment float4 snapshotFragment(SnapshotOut in [[stage_in]],texture2d<float> image [[texture(0)]],constant float2 &opacity [[buffer(0)]],constant float4 *sampling [[buffer(1)]]) {
         constexpr sampler s(coord::normalized,address::clamp_to_edge,filter::linear);
-        return image.sample(s,in.uv)*opacity.x;
+        return image.sample(s,sampling[0].xy+in.uv*sampling[0].zw)*opacity.x;
     }
-    fragment float4 snapshotBlend(SnapshotOut in [[stage_in]],texture2d<float> image [[texture(0)]],texture2d<float> previous [[texture(1)]],constant float2 &opacity [[buffer(0)]]) {
+    fragment float4 snapshotBlend(SnapshotOut in [[stage_in]],texture2d<float> image [[texture(0)]],texture2d<float> previous [[texture(1)]],constant float2 &opacity [[buffer(0)]],constant float4 *sampling [[buffer(1)]]) {
         constexpr sampler s(coord::normalized,address::clamp_to_edge,filter::linear);
-        return mix(previous.sample(s,in.uv),image.sample(s,in.uv),opacity.y)*opacity.x;
+        return mix(previous.sample(s,sampling[1].xy+in.uv*sampling[1].zw),image.sample(s,sampling[0].xy+in.uv*sampling[0].zw),opacity.y)*opacity.x;
     }
     """
 }

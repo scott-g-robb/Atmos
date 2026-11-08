@@ -26,9 +26,32 @@ enum Snowfall: Int, CaseIterable {
 
 enum Preferences {
   private static let defaults = UserDefaults.standard
+  static var menuBarStyle: MenuBarStyle {
+    get { defaults.string(forKey: "menuBarStyle").flatMap(MenuBarStyle.init(rawValue:)) ?? .simple }
+    set { defaults.set(newValue.rawValue, forKey: "menuBarStyle") }
+  }
   static var weatherUnits: WeatherUnits {
     get { defaults.string(forKey: "weatherUnits").flatMap(WeatherUnits.init(rawValue:)) ?? .metric }
-    set { defaults.set(newValue.rawValue, forKey: "weatherUnits") }
+    set {
+      defaults.set(newValue.rawValue, forKey: "weatherUnits")
+      for key in ["temperatureUnits","windUnits","rainfallUnits","visibilityUnits"] { defaults.removeObject(forKey:key) }
+    }
+  }
+  static var displayUnits: WeatherDisplayUnits {
+    get {
+      var units=WeatherDisplayUnits(preset:weatherUnits)
+      units.temperatureUnits=defaults.string(forKey:"temperatureUnits").flatMap(WeatherUnits.init(rawValue:)) ?? weatherUnits
+      units.windUnits=defaults.string(forKey:"windUnits").flatMap(WeatherUnits.init(rawValue:)) ?? weatherUnits
+      units.rainfallUnits=defaults.string(forKey:"rainfallUnits").flatMap(WeatherUnits.init(rawValue:)) ?? weatherUnits
+      units.visibilityUnits=defaults.string(forKey:"visibilityUnits").flatMap(WeatherUnits.init(rawValue:)) ?? weatherUnits
+      return units
+    }
+    set {
+      for (key,value) in [("temperatureUnits",newValue.temperatureUnits),("windUnits",newValue.windUnits),
+        ("rainfallUnits",newValue.rainfallUnits),("visibilityUnits",newValue.visibilityUnits)] {
+        defaults.set(value.rawValue,forKey:key)
+      }
+    }
   }
   private static let snowfallKey = "snowfall"
   private static let behindWindowsKey = "behindWindows"

@@ -10,7 +10,7 @@
   <a href="#build">Build from source</a>
 </p>
 <p align="center">macOS 14+ · Apple silicon &amp; Intel · Free for noncommercial use</p>
-<p align="center">Current build: <strong>0.14.2 (68)</strong> · <a href="CHANGELOG.md">What's changed since 0.13.2</a></p>
+<p align="center">Current build: <strong>0.14.3 (72)</strong> · <a href="CHANGELOG.md">What's changed since 0.13.2</a></p>
 
 ![Snow, rain, storm clouds, mist, fireflies and autumn leaves rendered by Atmos](docs/assets/scenes.png)
 

@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private let updateBadge = UpdateBadgeView(frame: .zero)
   private var updateItem: NSMenuItem!
   private var unitItems: [WeatherUnits: NSMenuItem] = [:]
+  private var menuBarStyleItems: [MenuBarStyle: NSMenuItem] = [:]
   private var automaticUpdateItem: NSMenuItem!
   private var setupPending = false
   private var setupWeatherPreparing = false
@@ -63,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var screenLocked = false
   private var sessionInactive = false
   private var welcome: WelcomeController?
+  private var personalisation: PersonalisationController?
   private let power = PowerMonitor()
   private var liveSceneTimer: Timer?
   private let weather: LiveWeather
@@ -139,6 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.updateActivity() }
     if setupPending {
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.showWelcome() }
+    } else {
+      screens.forEach { $0.resumeAfterSetup() }
     }
   }
 
@@ -423,6 +427,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       item.representedObject = unit.rawValue; unitItems[unit] = item
     }
     settings.addItem(withTitle: "Units", action: nil, keyEquivalent: "").submenu = units
+    add("Personalise Atmos…", #selector(showPersonalisation), to: settings)
+    let styles = NSMenu()
+    styles.autoenablesItems = false
+    for style in MenuBarStyle.allCases {
+      let item = add(style.title, #selector(chooseMenuBarStyle(_:)), to: styles)
+      item.representedObject = style.rawValue; menuBarStyleItems[style] = item
+      item.toolTip = style == .simple ? "Weather icon only"
+        : style == .compact ? "Icon and current temperature"
+        : "Icon, feels-like temperature and weather"
+    }
+    settings.addItem(withTitle: "Menu Bar Style", action: nil, keyEquivalent: "").submenu = styles
     loginItem = add("Open at Login", #selector(toggleOpenAtLogin), to: settings)
     automaticUpdateItem = add("Automatic Updates", #selector(toggleAutomaticUpdates), to: settings)
     add("Show Setup…", #selector(showWelcome), to: settings)
@@ -460,7 +475,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       let keepsOpen = ["chooseLiveWeather", "chooseMode:", "chooseWeatherSource:", "refreshWeather",
         "toggleAccumulate", "toggleMeltSnow", "toggleSnowOnWindows", "clearSnow", "toggleFogBloom",
         "toggleScreenReflections", "toggleBehindWindows", "toggleFullScreen", "toggleScreenshots",
-        "toggleOpenAtLogin", "toggleAutomaticUpdates", "chooseWeatherUnits:", "selectWallpaperReflections",
+        "toggleOpenAtLogin", "toggleAutomaticUpdates", "chooseWeatherUnits:", "chooseMenuBarStyle:", "selectWallpaperReflections",
         "selectSnapshotReflections", "selectLiveReflections"].contains(NSStringFromSelector(action))
       let permissionAction = ["toggleFogBloom", "toggleScreenReflections", "selectSnapshotReflections", "selectLiveReflections"].contains(NSStringFromSelector(action)) && !ScreenshotAccess.shared.isGranted
       let locationAction = NSStringFromSelector(action) == "chooseLiveWeather" && !Preferences.liveWeather && weather.locationAuthorization == .notDetermined
@@ -637,6 +652,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
     automaticUpdateItem.state = Preferences.automaticUpdates ? .on : .off
     for (unit, item) in unitItems { item.state = unit == Preferences.weatherUnits ? .on : .off }
+    for (style, item) in menuBarStyleItems { item.state = style == Preferences.menuBarStyle ? .on : .off }
   }
 
   private func select(_ snowfall: Snowfall) {
@@ -751,14 +767,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   @objc private func refreshWeather() {
     weather.requestsLocationAuthorization = true
-    weather.refresh(force: true)
+    weather.refresh(force: true, renewLocation: true)
   }
 
   @objc private func checkForUpdates() { updater.check() }
+  @objc private func showPersonalisation() {
+    if personalisation == nil { personalisation=PersonalisationController() }
+    personalisation?.show()
+  }
   @objc private func chooseWeatherUnits(_ sender: NSMenuItem) {
     guard let raw = sender.representedObject as? String, let units = WeatherUnits(rawValue: raw) else { return }
     Preferences.weatherUnits = units
     updateWeatherControls(); updateLiveWeatherMenu(); refreshCustomMenu(); updateStatusIcon()
+  }
+  @objc private func chooseMenuBarStyle(_ sender: NSMenuItem) {
+    guard let raw = sender.representedObject as? String, let style = MenuBarStyle(rawValue: raw) else { return }
+    Preferences.menuBarStyle = style
+    for (value, item) in menuBarStyleItems { item.state = value == style ? .on : .off }
+    updateWeatherControls(); updateStatusIcon(); refreshCustomMenu()
   }
   @objc private func toggleAutomaticUpdates() {
     Preferences.automaticUpdates.toggle()
@@ -912,15 +938,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private func updateStatusIcon() {
     guard let statusItem, let button = statusItem.button else { return }
     let available = updater.updateAvailable
-    statusItem.length = available ? NSStatusBar.system.thickness + 12 : NSStatusItem.squareLength
+    let text = Preferences.menuBarStyle.text(for: !setupPending && Preferences.liveWeather ? weather.current : nil,
+      units: Preferences.displayUnits)
+    button.title = text + (!text.isEmpty && available ? "   " : "")
+    button.imagePosition = text.isEmpty ? .imageOnly : .imageLeading
+    button.font = NSFont.menuBarFont(ofSize: 0)
+    statusItem.length = text.isEmpty
+      ? (available ? NSStatusBar.system.thickness + 12 : NSStatusItem.squareLength)
+      : NSStatusItem.variableLength
     button.image = EffectArtwork.statusImage(for: statusEffect)
+    if Preferences.liveWeather, let reading = weather.current {
+      button.image = NSImage(systemSymbolName: scene.menuSymbol(weather: reading), accessibilityDescription: scene.summary)
+    }
     button.appearsDisabled = effectiveIntensity == .off
     updateBadge.frame = CGRect(x: button.bounds.maxX - 6, y: (button.bounds.height - 5) / 2, width: 5, height: 5)
     updateBadge.isHidden = !available
     let notice = available ? " · Update available" : ""
-    button.setAccessibilityLabel("Atmos — \(scene.summary)" + notice)
+    button.setAccessibilityLabel("Atmos — \(text.isEmpty ? scene.summary : text)" + notice)
     let weatherStatus = weather.current.map {
-      "\($0.condition) · \(Preferences.weatherUnits.temperature($0.temperature)) · \(Preferences.weatherUnits.wind($0.windSpeed))"
+      "\($0.condition) · \(Preferences.displayUnits.temperature($0.temperature)) · \(Preferences.displayUnits.wind($0.windSpeed))"
     } ?? weather.status
     button.toolTip = (Preferences.liveWeather
       ? "Atmos · Live Weather On · \(weatherStatus)" : "Atmos · Manual · \(scene.summary)") + notice
@@ -929,6 +965,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   // MARK: - System
 
   private func observeSystem() {
+    observe(.default, .atmosPersonalisationChanged) {
+      $0.updateWeatherControls();$0.updateLiveWeatherMenu();$0.updateStatusIcon();$0.refreshCustomMenu()
+    }
     power.changed = { [unowned self] in screens.forEach { $0.apply(power.budget) } }
     let workspace = NSWorkspace.shared.notificationCenter
     let distributed = DistributedNotificationCenter.default()
@@ -1010,6 +1049,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         visible: snow.window.occlusionState.contains(.visible), fading: snow.fading)
       snow.setActive(plan.renders, asleep: !awake)
     }
+  }
+
+  private var terminationPending = false
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    guard !terminationPending else { return .terminateLater }
+    guard !screens.isEmpty else { return .terminateNow }
+    terminationPending = true
+    let duration: Double = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.15 : 0.45
+    screens.forEach { $0.beginExit(duration: duration) }
+    let overlayNumbers = Set(screens.flatMap { [$0.window.windowNumber, $0.dock.window.windowNumber, $0.backgroundFog.window.windowNumber] })
+    NSAnimationContext.runAnimationGroup({ context in
+      context.duration = duration
+      context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+      for window in sender.windows where window.isVisible && !overlayNumbers.contains(window.windowNumber) {
+        window.animator().alphaValue = 0
+      }
+    }, completionHandler: { sender.reply(toApplicationShouldTerminate: true) })
+    return .terminateLater
   }
 
   func applicationWillTerminate(_ notification: Notification) {

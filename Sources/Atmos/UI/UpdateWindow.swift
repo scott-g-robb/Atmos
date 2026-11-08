@@ -20,6 +20,7 @@ final class UpdatePanel:NSObject {
     window.title="Atmos Updates"
     window.isOpaque=false;window.backgroundColor = .clear;window.hasShadow=true
     window.level = AtmosPanelPresentation.level;window.identifier = AtmosPanelPresentation.identifier
+    window.appearance=Preferences.interfaceAppearance.native
     window.isReleasedWhenClosed=false;window.isMovableByWindowBackground=true
     window.collectionBehavior=[.canJoinAllSpaces,.fullScreenAuxiliary]
     window.onCancel={ [weak self] in self?.secondaryAction() }

@@ -110,7 +110,7 @@ final class LiveSky141Tests: XCTestCase {
     let url = AppleWeatherREST.requestURL(at: location, countryCode: "gb")
     let query = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
     XCTAssertEqual(query.first { $0.name == "country" }?.value, "GB")
-    XCTAssertEqual(query.first { $0.name == "dataSets" }?.value, "currentWeather,weatherAlerts")
+    XCTAssertEqual(query.first { $0.name == "dataSets" }?.value, "currentWeather,forecastDaily,weatherAlerts")
     XCTAssertTrue(url.path.hasSuffix("/51.47/-0.37"))
     for country in [nil, "G-B", "England"] {
       let url = AppleWeatherREST.requestURL(at: location, countryCode: country)

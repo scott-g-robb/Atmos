@@ -7,6 +7,14 @@ struct WeatherMenuLayer: Equatable, Identifiable {
 }
 
 extension WeatherScene {
+  func menuSymbol(weather: WeatherSnapshot) -> String {
+    if primary == .none || primary == .sunlight {
+      return weather.weatherCode == 0
+        ? (weather.isDay == 1 ? "sun.max" : "moon.stars")
+        : (weather.isDay == 1 ? "cloud.sun" : "cloud.moon")
+    }
+    return primary.symbol
+  }
   /// Describe the scene used by rendering, including secondary atmospheric layers.
   /// Keep measurements on the details page, and collapse layers sharing one renderer.
   var menuLayers: [WeatherMenuLayer] {
@@ -38,7 +46,7 @@ extension WeatherSnapshot {
   /// One complete set of reported scene inputs. Missing optional observations stay
   /// unknown here, rather than displaying the simulation's inferred defaults as data.
   var menuMeasurements: [WeatherMenuMeasurement] {
-    let units = Preferences.weatherUnits
+    let units = Preferences.displayUnits
     let direction = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Int((windDirection / 45).rounded()) % 8]
     return [
       .init(title: "Temperature", symbol: "thermometer.medium", value: units.temperature(temperature)),

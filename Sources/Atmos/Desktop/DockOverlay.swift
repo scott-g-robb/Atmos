@@ -41,7 +41,10 @@ final class DockOverlay {
     layer.pixelFormat = .bgra8Unorm
     layer.isOpaque = false
     layer.framebufferOnly = false
-    layer.maximumDrawableCount = 2
+    // Two GPU frames can be in flight while WindowServer retains its current
+    // presentation. A third surface prevents acquiring the auxiliary layer from
+    // blocking the main display-link callback during window animations.
+    layer.maximumDrawableCount = 3
     // While the strip resizes, a frame of the other size stays pinned to the shared origin instead of stretching.
     layer.contentsGravity = .resize
     layer.needsDisplayOnBoundsChange = false

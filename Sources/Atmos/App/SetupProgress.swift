@@ -1,16 +1,20 @@
 import Foundation
 
 struct SetupProgress {
-  enum Page { case welcome, permissions, menuBar, complete }
+  enum Page { case welcome, permissions, customisation, menuBar, complete }
   enum Completion { case skipped, menuBar }
   private(set) var page: Page = .welcome
   private(set) var completion: Completion?
   var isPaused: Bool { completion == nil }
   mutating func next() {
     if page == .welcome { page = .permissions }
-    else if page == .permissions { page = .menuBar }
+    else if page == .permissions { page = .customisation }
+    else if page == .customisation { page = .menuBar }
   }
-  mutating func back() { if page == .permissions { page = .welcome } }
+  mutating func back() {
+    if page == .permissions { page = .welcome }
+    else if page == .customisation { page = .permissions }
+  }
   mutating func skip() { page = .complete; completion = .skipped }
   mutating func openedMenu() {
     if page == .menuBar { page = .complete; completion = .menuBar }

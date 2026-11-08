@@ -1,5 +1,40 @@
 # Atmos changes
 
+## 0.14.3 — Local conditions, smoother desktop motion
+
+- The weather card includes feels-like temperature and the day's high/low. Choose
+  Simple, Compact or Full menu-bar weather in Settings; all temperatures follow
+  the selected units and Simple preserves the icon-only default.
+- Quick customisation follows permissions: choose appearance, an accent colour,
+  measurement units (including mixed combinations) and menu-bar style. Settings
+  groups personalisation, desktop effects, privacy and app options clearly.
+- Clouds retain their own opacity when combined with haze or fog; local visibility
+  controls the low atmosphere without fading the sky. The mist veil applies its
+  optical density once. Compact shows current temperature; Full shows feels-like
+  temperature and condition beside the icon.
+- The welcome forms gently with the intro audio's swell, using a shared scheduled
+  start, slower text reveals and a steady settle without overshoot.
+- Welcome startup, empty scenes and pause/wake clear through the native display
+  clock, preventing an invisible running process before the menu icon appears.
+- Weather warnings appear on the main Live weather page. Its icon and the menu-bar
+  icon describe the actual scene, including fog and partly cloudy conditions.
+- Local visibility controls fog under regional warnings: clear visibility means no
+  fog, while the official warning remains prominent. Scheduled weather checks renew
+  location every 15 minutes and keep the last successful scene until new data arrives.
+- Open skies receive a lighter upper fog veil for a balanced desktop. Window glow
+  follows the geometry used to composite screenshots, clearing obsolete footprints
+  during minimisation and restoration.
+- Reflections retain desktop scale, with screenshot content bounds cropped correctly
+  and updated textures crossfading without changes in registration.
+- Display-linked frame delivery keeps UI input independent of drawable waits. Static
+  fog reuses its glow field, and redundant full-screen passes and window-system
+  queries are removed while native refresh, appearance and interaction are retained.
+- Liquid neighbour traversal reuses exact cell coordinates and skips already
+  processed pairs, retaining identical particle physics. GPU contention skips
+  work for frames that cannot be submitted instead of wasting simulation work.
+- Quitting for a manual or automatic update fades the atmosphere out; relaunch fades
+  it back in. Automatic updates remain silent and do not show setup.
+
 ## 0.14.2 — A clearer, lighter atmosphere
 
 - See the combined atmosphere at a glance: the Live weather overview shows its

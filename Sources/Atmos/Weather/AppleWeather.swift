@@ -36,8 +36,11 @@ enum AppleWeather {
   /// personal Keychain fallback. It never prints weather, credentials or tokens.
   static func verifyNativeAccess() async throws {
     guard isConfigured else { throw URLError(.userAuthenticationRequired) }
-    _ = try await WeatherAttempt.run(timeout: 20) {
+    let reading = try await WeatherAttempt.run(timeout: 20) {
       try await fetchNative(at: CLLocation(latitude: 51.50, longitude: -0.12))
+    }
+    guard reading.snapshot.highTemperature != nil, reading.snapshot.lowTemperature != nil else {
+      throw URLError(.cannotParseResponse)
     }
   }
 
@@ -53,12 +56,20 @@ enum AppleWeather {
   private static func fetchNative(at location: CLLocation) async throws -> Reading {
     // Unsupported alert regions must not discard a successful current reading.
     let current: CurrentWeather
+    var daily: DayWeather?
     var alerts: [WeatherAlert]? = nil
     do {
-      (current, alerts) = try await WeatherService.shared.weather(for: location, including: .current, .alerts)
+      let result = try await WeatherService.shared.weather(for: location, including: .current, .daily, .alerts)
+      current = result.0; daily = result.1.forecast.first; alerts = result.2
     } catch {
       try Task.checkCancellation()
-      current = try await WeatherService.shared.weather(for: location, including: .current)
+      do {
+        let result = try await WeatherService.shared.weather(for: location, including: .current, .daily)
+        current = result.0; daily = result.1.forecast.first
+      } catch {
+        try Task.checkCancellation()
+        current = try await WeatherService.shared.weather(for: location, including: .current)
+      }
     }
     let attribution = try await WeatherService.shared.attribution
     let mapping = mapping(current.condition)
@@ -75,6 +86,8 @@ enum AppleWeather {
     snapshot.humidity = current.humidity * 100
     snapshot.cloudCover = current.cloudCover * 100
     snapshot.apparentTemperature = current.apparentTemperature.converted(to: .celsius).value
+    snapshot.setDailyTemperatures(high: daily?.highTemperature.converted(to: .celsius).value,
+      low: daily?.lowTemperature.converted(to: .celsius).value)
     snapshot.reportedCondition = current.condition.accessibilityDescription
     snapshot.preferredEffect = mapping.effect
     snapshot.precipitationUnit = "mm/h"

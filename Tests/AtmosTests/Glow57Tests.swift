@@ -120,6 +120,8 @@ final class Glow57Tests:XCTestCase {
     XCTAssertTrue(setup.isPaused);XCTAssertNil(setup.completion)
     setup.openedMenu();XCTAssertTrue(setup.isPaused)
     setup.next();XCTAssertTrue(setup.isPaused)
+    setup.next();XCTAssertTrue(setup.isPaused,"Customisation is still part of setup")
+    setup.openedMenu();XCTAssertTrue(setup.isPaused)
     setup.next();XCTAssertTrue(setup.isPaused,"The arrow is still part of setup")
     setup.openedMenu();XCTAssertFalse(setup.isPaused);XCTAssertEqual(setup.completion,.menuBar)
     for previous in [false,true] {for granted in [false,true] {

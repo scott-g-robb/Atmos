@@ -5,6 +5,13 @@ import WeatherKit
 /// Personal-key access for this Mac. Distributed builds use the native entitlement or Open-Meteo.
 enum AppleWeatherREST {
   private struct Response: Decodable { let currentWeather: Current }
+  private struct DailyResponse: Decodable {
+    struct Daily: Decodable {
+      struct Day: Decodable { let temperatureMax: Double?; let temperatureMin: Double? }
+      let days: [Day]
+    }
+    let forecastDaily: Daily
+  }
   private struct AlertResponse: Decodable { let weatherAlerts: AlertCollection? }
   private struct AlertCollection: Decodable {
     let detailsUrl: URL?
@@ -70,6 +77,9 @@ enum AppleWeatherREST {
     snapshot.humidity = current.humidity * 100
     snapshot.cloudCover = current.cloudCover * 100
     snapshot.apparentTemperature = current.temperatureApparent
+    if let today = try? JSONDecoder().decode(DailyResponse.self, from: data).forecastDaily.days.first {
+      snapshot.setDailyTemperatures(high: today.temperatureMax, low: today.temperatureMin)
+    }
     snapshot.preferredEffect = mapping.effect
     snapshot.reportedCondition = condition?.accessibilityDescription ?? "Cloudy"
     snapshot.precipitationUnit = "mm/h"
@@ -111,7 +121,7 @@ enum AppleWeatherREST {
     let candidate = countryCode?.uppercased()
     let country = candidate.flatMap { $0.count == 2 && $0.allSatisfy { $0.isASCII && $0.isLetter } ? $0 : nil }
     var url = URLComponents(string: "https://weatherkit.apple.com/api/v1/weather/en/\(latitude)/\(longitude)")!
-    url.queryItems = [URLQueryItem(name: "dataSets", value: country?.count == 2 ? "currentWeather,weatherAlerts" : "currentWeather")]
+    url.queryItems = [URLQueryItem(name: "dataSets", value: country?.count == 2 ? "currentWeather,forecastDaily,weatherAlerts" : "currentWeather,forecastDaily")]
     if let country, country.count == 2 { url.queryItems!.append(URLQueryItem(name: "country", value: country)) }
     return url.url!
   }

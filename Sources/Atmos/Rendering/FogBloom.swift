@@ -22,6 +22,15 @@ final class FogBloom {
   private(set) var scene: MTLTexture?
   private var field: MTLTexture?
   private var scratch: MTLTexture?
+  private var targetSize = SIMD2<Int>.zero
+  private var includesScene = true
+  private var preparedDesktop: MTLTexture?
+  private var preparedWallpaper: MTLTexture?
+  private var preparedWindows: [SIMD4<Float>] = []
+  private var preparedIDs: [UInt32] = []
+  private var preparedRect = SIMD4<Float>.zero
+  private var preparedCapture: Double?
+  private(set) var fieldUpdates = 0
 
   init(device: MTLDevice, format: MTLPixelFormat) throws {
     self.device = device
@@ -44,13 +53,19 @@ final class FogBloom {
     composite = try device.makeRenderPipelineState(descriptor: descriptor)
   }
 
-  func scenePass(for target: MTLTexture) -> MTLRenderPassDescriptor? {
-    if scene?.width != target.width || scene?.height != target.height {
+  func scenePass(for target: MTLTexture, includesScene: Bool = true) -> MTLRenderPassDescriptor? {
+    if targetSize != SIMD2(target.width, target.height) || self.includesScene != includesScene {
+      targetSize = SIMD2(target.width, target.height); self.includesScene = includesScene
       let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: target.pixelFormat,
-        width: target.width, height: target.height, mipmapped: false)
-      descriptor.storageMode = .private
+        width: includesScene ? target.width : 1, height: includesScene ? target.height : 1, mipmapped: false)
+      descriptor.storageMode = includesScene ? .private : .shared
       descriptor.usage = [.renderTarget, .shaderRead]
       scene = device.makeTexture(descriptor: descriptor)
+      if !includesScene {
+        var zero: UInt32 = 0
+        scene?.replace(region: MTLRegionMake2D(0,0,1,1), mipmapLevel: 0, withBytes: &zero, bytesPerRow: 4)
+      }
+      preparedDesktop = nil
       let width = min(640, max(2, target.width / 4))
       let height = max(2, Int((Double(width) * Double(target.height) / Double(target.width)).rounded()))
       let low = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float,
@@ -71,8 +86,18 @@ final class FogBloom {
 
   func prepare(desktop: MTLTexture, rect: SIMD4<Float>, size: SIMD2<Float>,
     windows: [SIMD4<Float>], command: MTLCommandBuffer, wallpaper: MTLTexture? = nil,
-    windowIDs: [UInt32] = [], capturedAt: Double? = nil, now: Double = CACurrentMediaTime()) {
+    windowIDs: [UInt32] = [], capturedAt: Double? = nil, now: Double = CACurrentMediaTime(),
+    geometrySynchronized: Bool = false) {
     guard let scene, let field, let scratch else { return }
+    // With no foreground emitters, the light field depends only on cached pixels
+    // and geometry. Reuse the exact GPU result until either changes; fog itself
+    // still moves and composites at the display's native refresh rate.
+    if !includesScene, capturedAt != nil, preparedDesktop === desktop,
+      preparedWallpaper === wallpaper, preparedWindows == windows, preparedIDs == windowIDs,
+      preparedRect == rect, preparedCapture == capturedAt { return }
+    preparedDesktop = desktop; preparedWallpaper = wallpaper; preparedWindows = windows
+    preparedIDs = windowIDs; preparedRect = rect; preparedCapture = capturedAt
+    fieldUpdates += 1
     var rect = rect
     var geometry = SIMD4(size.x, size.y, Float(min(128, windows.count)), wallpaper == nil ? 0 : 1)
     let frames = Array(windows.prefix(128))
@@ -84,7 +109,9 @@ final class FogBloom {
     }
     let visible = Set(ids)
     let capture = capturedAt ?? now
-    for (id,edge) in tracked where !visible.contains(id) { departed.append((edge.frame,now)) }
+    if !geometrySynchronized {
+      for (id,edge) in tracked where !visible.contains(id) { departed.append((edge.frame,now)) }
+    } else { departed.removeAll(keepingCapacity: true) }
     departed.removeAll { capture >= $0.at }
     if departed.count > 128 { departed.removeFirst(departed.count-128) }
     tracked = tracked.filter { visible.contains($0.key) }
@@ -99,12 +126,12 @@ final class FogBloom {
       if edge.frame != frames[i] { edge.frame = frames[i]; edge.changed = now }
       // Colours stay attached to window identity throughout a drag. Refresh only
       // after capture has caught up to a stationary window, never from old pixels.
-      let ready = capture >= edge.changed && (fresh || now-edge.changed >= 0.10)
+      let ready = geometrySynchronized || (capture >= edge.changed && (fresh || now-edge.changed >= 0.10))
       let update = ready && capture != edge.captured
       parameters.append(SIMD4(Float(slot),update ? 1:0,fresh ? 1:0,0))
       if update { edge.captured = capture; edge.source = frames[i] }
       let f = frames[i], old = edge.source
-      exclusions.append(SIMD4(min(f.x,old.x),min(f.y,old.y),max(f.z,old.z),max(f.w,old.w)))
+      exclusions.append(geometrySynchronized ? f : SIMD4(min(f.x,old.x),min(f.y,old.y),max(f.z,old.z),max(f.w,old.w)))
       tracked[id] = edge
     }
     if !frames.isEmpty, let encoder = command.makeComputeCommandEncoder() {
@@ -182,7 +209,12 @@ final class FogBloom {
     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
   }
 
-  func reset() { scene = nil; field = nil; scratch = nil; tracked.removeAll(keepingCapacity:true); departed.removeAll(keepingCapacity:true) }
+  func reset() {
+    scene = nil; field = nil; scratch = nil; targetSize = .zero
+    tracked.removeAll(keepingCapacity:true); departed.removeAll(keepingCapacity:true)
+    preparedDesktop = nil; preparedWallpaper = nil; preparedWindows.removeAll(keepingCapacity: true)
+    preparedIDs.removeAll(keepingCapacity: true); preparedCapture = nil
+  }
 
   private func dispatch(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState,
     texture: MTLTexture) {
@@ -240,7 +272,9 @@ let fogBloomShaderSource = """
         sum+=colour*boundary;weight+=boundary;
       }
       float3 target=weight>0.01 ? fogEmitter(sum/weight,min(1.0,weight/2.0),0.32):float3(0);
-      old=float4(mix(old.rgb,target,old.a>0.5 ? 0.25:0.5),1);
+      // Screenshot caches can remain unchanged for ten seconds. A new window
+      // starts at its measured colour, rather than staying half-lit until a drag.
+      old=float4(old.a>0.5 ? mix(old.rgb,target,0.25):target,1);
     }
     cache[slot]=old;
   }

@@ -114,6 +114,7 @@ final class WeatherSetup62Tests:XCTestCase {
     XCTAssertNotNil(weather.current,"Leaving Permissions must prepare the first reading during the guide")
     XCTAssertFalse(Preferences.liveWeather,"The visible live scene stays paused until the icon is opened")
     let prepared=weather.updatedAt
+    try page().next.performClick(nil);settle(0.4)
     app.menuWillOpen(menu)
     XCTAssertTrue(Preferences.liveWeather)
     XCTAssertFalse(weather.isSuspended)
@@ -139,6 +140,10 @@ final class WeatherSetup62Tests:XCTestCase {
     trackMenu(for:0.7,until:{weather.current != nil})
     XCTAssertNotNil(weather.current,"An immediate icon click must not postpone the callback until menu close")
     XCTAssertEqual(counts.requests,1)
+    XCTAssertFalse(Preferences.liveWeather,"Customisation must finish before live rendering starts")
+    settle(0.3) // The reading can arrive before the customisation page finishes its entrance.
+    try page().next.performClick(nil);settle(0.4)
+    app.menuWillOpen(menu)
     withExtendedLifetime(app){}
   }
 
@@ -155,6 +160,7 @@ final class WeatherSetup62Tests:XCTestCase {
     try showSetup(app,menu:menu)
     try page().next.performClick(nil);settle(0.4)
     XCTAssertFalse(weather.enabled);XCTAssertEqual(counts.requests,0)
+    try page().next.performClick(nil);settle(0.4)
     app.menuWillOpen(menu)
     XCTAssertFalse(Preferences.liveWeather);XCTAssertEqual(counts.requests,0)
     withExtendedLifetime(app){}

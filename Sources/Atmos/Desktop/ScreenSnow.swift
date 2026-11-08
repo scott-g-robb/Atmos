@@ -10,11 +10,18 @@ final class ScreenSnow {
   private var panelFrames: [CGRect] = []
   var simulation: SnowSimulation { renderer.simulation }
   private let view: MTKView
+  private var frameClock: NativeFrameClock?
+  private var renderingPaused: Bool {
+    get { frameClock?.isPaused ?? view.isPaused }
+    set { if let frameClock { frameClock.isPaused = newValue } else { view.isPaused = newValue } }
+  }
+  private var exiting = false
   private let renderer: Renderer
   private let reflection: ScreenReflection
   private var placementTimer: Timer?
   private var coveredGeometryCheck: CFTimeInterval = -1
   private var automaticallyBehind = false
+  private var presentationTransition = false
   private let occlusionMask = WindowOcclusionMask()
   private var topWindowIDs = Set<CGWindowID>()
   private var effect = WeatherEffect.snow
@@ -177,6 +184,13 @@ final class ScreenSnow {
   }
 
   var isCapturingReflections: Bool { reflection.isCapturing }
+  var frameCounts: (delivered: Int, presented: Int, geometryQueries: Int) {
+    (frameClock?.deliveredFrames ?? 0, frameClock?.presentedFrames ?? 0, tracker.queryCount)
+  }
+  var profileTimings: (input: Double, simulation: Double, encode: Double, particles: Int) {
+    (renderer.profileInput, renderer.profileSimulation, renderer.profileEncode, renderer.weather.particleCount)
+  }
+  var profileWaterDepth: Float { renderer.weather.water.map(\.top).max() ?? 0 }
   func refreshCapturePermission() {
     guard !reflection.isCapturing else { return }
     reflection.invalidate(); wake()
@@ -250,7 +264,9 @@ final class ScreenSnow {
       let update = tracker.poll(now: now, eager: NSEvent.pressedMouseButtons != 0,
         frameInterval: (renderer.hasFog || renderer.hasWater) ? 1/Double(renderer.presentationFrameRate) : 1.0/62)
       let geometryChanged = geometryRevision != tracker.geometryRevision
-      if geometryChanged {
+      let transitioning = tracker.hasPresentationTransition(now: now)
+      if geometryChanged || presentationTransition != transitioning {
+        presentationTransition = transitioning
         updatePlacement()
         geometryRevision = tracker.geometryRevision
         renderer.desktopMoved(now: now)
@@ -278,14 +294,17 @@ final class ScreenSnow {
       renderer.fogBloomRect = reflection.bloomRect
       return (light.light, light.shadowTint, light.rim)
     }
-    renderer.prepareReflection = { [unowned self] command in reflection.prepare(into: command) }
+    renderer.prepareReflection = { [unowned self] command in
+      reflection.prepare(into: command)
+      return reflection.compositedAt
+    }
     renderer.rest = { [unowned self] in
       // An empty scene has no next draw callback to notice its last puddle dried.
       // End capture here as well, before pausing the display link.
       reflection.stop()
       renderer.reflection = nil
       renderer.fogBloomTexture = nil
-      view.isPaused = true
+      renderingPaused = true
       renderer.releaseFrames(of: view)
       if self.simulation.snowfall == .off && !hasContent {
         placementTimer?.invalidate()
@@ -298,6 +317,7 @@ final class ScreenSnow {
     measure()
     view.delegate = renderer
     window.contentView = view
+    frameClock = NativeFrameClock(view: view, renderer: renderer)
     window.orderFrontRegardless()
     checkCovered()
     startPlacementWatcher()
@@ -310,7 +330,7 @@ final class ScreenSnow {
         .pollsWindows
     else { return }
     let timer = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in
-      guard let self, !asleep, !covered, view.isPaused else { return }
+      guard let self, !asleep, !covered, renderingPaused else { return }
       // Drawing can stop before the full-screen Space finishes its transition.
       checkCovered()
       if covered {
@@ -341,6 +361,7 @@ final class ScreenSnow {
     light.invalidate()
     renderer.nativeFrameRate = max(1, screen.maximumFramesPerSecond)
     view.preferredFramesPerSecond = renderer.nativeFrameRate
+    frameClock?.updateRate()
     measure()
     checkCovered()
   }
@@ -349,6 +370,7 @@ final class ScreenSnow {
     renderer.budget = budget
     reflection.powerBudget = budget
     view.preferredFramesPerSecond = renderer.presentationFrameRate
+    frameClock?.updateRate()
     renderer.configureLayers {
       $0.density = budget == .saver ? 0.75 : 1
       $1.density = budget == .saver ? 0.65 : 1
@@ -372,9 +394,9 @@ final class ScreenSnow {
       renderer.fogBloomTexture = nil
     }
     if !active { renderer.releaseFrames(of: view) }
-    guard view.isPaused == active else { return }
+    guard renderingPaused == active else { return }
     if active { Renderer.fitDrawable(of: view) }
-    view.isPaused = !active
+    renderingPaused = !active
     if active { renderer.resetClock() }
   }
 
@@ -395,10 +417,20 @@ final class ScreenSnow {
   }
 
   private func wake() {
-    guard active, view.isPaused else { return }
+    guard active, renderingPaused else { return }
     Renderer.fitDrawable(of: view)
-    view.isPaused = false
+    renderingPaused = false
     renderer.resetClock()
+  }
+
+  func beginExit(duration: Double) {
+    exiting = true; following = false; alphaTarget = 0
+    fadeEndsAt = CACurrentMediaTime() + duration
+    NSAnimationContext.runAnimationGroup { context in
+      context.duration = duration
+      context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+      for overlay in [window, dock.window, backgroundFog.window] { overlay.animator().alphaValue = 0 }
+    }
   }
 
   func dropWindowSnow() {
@@ -416,8 +448,8 @@ final class ScreenSnow {
     let allowsFullScreen = overFullScreen && tracker.fullScreenInView
     let behind =
       !allowsFullScreen
-      && WindowCoverage.shouldYield(
-        screen: local, windows: tracker.applicationFrames, alreadyBehind: automaticallyBehind)
+      && (tracker.hasPresentationTransition(now: CACurrentMediaTime()) || WindowCoverage.shouldYield(
+        screen: local, windows: tracker.applicationFrames, alreadyBehind: automaticallyBehind))
     let topWindows =
       allowsFullScreen
       ? [:]
@@ -560,6 +592,7 @@ final class ScreenSnow {
   /// Gone full screen, the window server hides the overlays for the move and shows them again once the app is in:
   /// they vanish while hidden, so they come back already gone.
   private func fade() {
+    guard !exiting else { return }
     if following && !occluded {
       alphaTarget = nil
       return
@@ -618,6 +651,7 @@ final class ScreenSnow {
   }
 
   func spaceChanged() {
+    Spaces.invalidate()
     checkCovered()
     renderer.spaceChanged()
     light.invalidate()
@@ -652,7 +686,8 @@ final class ScreenSnow {
     placementTimer?.invalidate()
     reflection.stop()
     active = false
-    view.isPaused = true
+    renderingPaused = true
+    frameClock?.invalidate()
     view.delegate = nil
     window.orderOut(nil)
     dock.close()
@@ -687,7 +722,7 @@ final class ScreenSnow {
     view.colorPixelFormat = .bgra8Unorm
     view.clearColor = MTLClearColorMake(0, 0, 0, 0)
     view.framebufferOnly = true
-    (view.layer as? CAMetalLayer)?.maximumDrawableCount = 2
+    (view.layer as? CAMetalLayer)?.maximumDrawableCount = 3
     view.preferredFramesPerSecond = 30
     view.autoresizingMask = [.width, .height]
     view.autoResizeDrawable = false

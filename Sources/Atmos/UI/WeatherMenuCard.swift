@@ -104,7 +104,7 @@ final class WeatherMenuCard: NSView {
     }
     alerts.isHidden = alerts.arrangedSubviews.isEmpty
     if let reading {
-      let units = Preferences.weatherUnits
+      let units = Preferences.displayUnits
       temperature.stringValue = units.temperature(reading.temperature)
       condition.stringValue =
         reading.condition.prefix(1).uppercased() + reading.condition.dropFirst()

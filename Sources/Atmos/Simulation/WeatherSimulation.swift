@@ -883,7 +883,10 @@ final class WeatherSimulation {
       // A broad optical veil gives fog its continuous loss of contrast. It is
       // always behind windows; small moving billows add depth within the veil.
       let ceiling = max(1, min(size.y, skyCeiling))
-      let height = ceiling * (0.62 + fogAmount * 0.20)
+      // An open sky gets a thin upper veil; clouds smoothly take over that volume.
+      let cover = dynamics?.cloudCover ?? scene.manualCloudCover ?? scene.clouds
+      let upperShare = 1 - min(1, max(0, cover) / 0.75)
+      let height = ceiling * (0.62 + fogAmount * 0.20 + upperShare * 0.60)
       decorations.append(WeatherParticle(
         rect: SIMD4(size.x * 0.5, height * 0.5, size.x * 1.04, height),
         motion: SIMD4(0, 0, 0.37, 15), color: SIMD4(0.82, 0.87, 0.90, fogAmount * 0.60),

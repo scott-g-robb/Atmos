@@ -46,6 +46,7 @@ final class WelcomeController: NSObject {
     window.backgroundColor = .clear
     window.hasShadow = true
     window.identifier = AtmosPanelPresentation.identifier
+    window.appearance = Preferences.interfaceAppearance.native
     window.level = Self.frontLevel
     window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     window.isMovableByWindowBackground = true
@@ -55,9 +56,9 @@ final class WelcomeController: NSObject {
     window.center()
     self.window = window
     NSApp.activate(ignoringOtherApps: true)
-    if let page = window.contentView as? SetupPageView { page.prepareEntrance(calm: calm) }
+    let introStart = introAudio.play()
+    if let page = window.contentView as? SetupPageView { page.prepareEntrance(calm: calm, startTime: introStart) }
     window.makeKeyAndOrderFront(nil)
-    introAudio.play()
     observer = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification,
       object: nil, queue: .main) { [weak self] _ in
         guard let self, progress.page == .permissions else { return }
@@ -84,8 +85,10 @@ final class WelcomeController: NSObject {
 
   @objc private func next() {
     guard !transitioning else { return }
+    (window?.contentView as? SetupPageView)?.finishEntrance()
     progress.next()
-    if progress.page == .menuBar { prepareWeather(); revealMenuBar() }
+    if progress.page == .customisation { prepareWeather() }
+    if progress.page == .menuBar { revealMenuBar() }
     else { changePage(forward: true) }
   }
   @objc private func back() {
@@ -94,13 +97,14 @@ final class WelcomeController: NSObject {
   }
   @objc private func skip() {
     guard !transitioning else { return }
+    (window?.contentView as? SetupPageView)?.finishEntrance()
     transitioning = true
     progress.skip()
     animate(duration: 0.22, changes: { self.window?.animator().alphaValue = 0 }) { [weak self] in self?.finish() }
   }
 
   private func makePage() -> SetupPageView {
-    let view = SetupPageView(frame: CGRect(x: 0, y: 0, width: 520, height: progress.page == .permissions ? 630 : 530),
+    let view = SetupPageView(frame: CGRect(x: 0, y: 0, width: 520, height: progress.page == .welcome ? 530 : 630),
       page: progress.page, permissions: permissions(), icon: appIcon)
     view.next.target = self; view.next.action = #selector(next)
     view.previous.target = self
@@ -306,6 +310,14 @@ final class SetupPageView: NSView {
       content.setCustomSpacing(25, after: icon)
       content.setCustomSpacing(6, after: thanks)
       content.setCustomSpacing(9, after: title)
+    } else if page == .customisation {
+      content.addArrangedSubview(label("Make it yours.", size: 27, weight: .medium))
+      content.addArrangedSubview(label("A few personal touches.\nChange these anytime in Settings.", size: 13, color: .secondaryLabelColor))
+      let choices=QuickCustomisationView(frame:.zero)
+      choices.translatesAutoresizingMaskIntoConstraints=false
+      content.addArrangedSubview(choices)
+      choices.widthAnchor.constraint(equalToConstant:440).isActive=true
+      content.setCustomSpacing(24,after:content.arrangedSubviews[1])
     } else {
       content.addArrangedSubview(label("Make yourself at home.", size: 27, weight: .medium))
       content.addArrangedSubview(label("A few permissions for the full Atmos experience.\nYou can change these later in Settings.", size: 13, color: .secondaryLabelColor))
@@ -334,7 +346,7 @@ final class SetupPageView: NSView {
     previous.translatesAutoresizingMaskIntoConstraints = false
     addSubview(previous); addSubview(next)
     let steps = SetupStepsView(frame: .zero)
-    steps.step = page == .welcome ? 0 : 1
+    steps.step = page == .welcome ? 0 : page == .permissions ? 1 : 2
     steps.translatesAutoresizingMaskIntoConstraints = false
     addSubview(steps)
     NSLayoutConstraint.activate([
@@ -344,9 +356,9 @@ final class SetupPageView: NSView {
       next.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -28),
       next.widthAnchor.constraint(equalToConstant: 96), next.heightAnchor.constraint(equalToConstant: 36),
       steps.centerXAnchor.constraint(equalTo: centerXAnchor), steps.centerYAnchor.constraint(equalTo: next.centerYAnchor),
-      steps.widthAnchor.constraint(equalToConstant: 26), steps.heightAnchor.constraint(equalToConstant: 8),
+      steps.widthAnchor.constraint(equalToConstant: 42), steps.heightAnchor.constraint(equalToConstant: 8),
     ])
-    setAccessibilityLabel(page == .welcome ? "Welcome to Atmos" : "Atmos permissions")
+    setAccessibilityLabel(page == .welcome ? "Welcome to Atmos" : page == .permissions ? "Atmos permissions" : "Atmos customisation")
   }
   required init?(coder: NSCoder) { nil }
   private static var centered: NSParagraphStyle {
@@ -356,10 +368,11 @@ final class SetupPageView: NSView {
   func update(_ permissions: [SetupPermission]) {
     for permission in permissions { permissionRows[permission.kind]?.update(permission) }
   }
-  func prepareEntrance(calm: Bool) {
+  func prepareEntrance(calm: Bool, startTime: CFTimeInterval = CACurrentMediaTime()) {
     guard let layer else { return }
     if calm {
-      let fade = CABasicAnimation(keyPath: "opacity"); fade.fromValue = 0; fade.toValue = 1; fade.duration = 0.14
+      let fade = CABasicAnimation(keyPath: "opacity"); fade.fromValue = 0; fade.toValue = 1; fade.duration = 0.35
+      fade.beginTime = layer.convertTime(startTime, from: nil); fade.fillMode = .backwards
       layer.add(fade, forKey: "accessibleEntrance"); return
     }
     layoutSubtreeIfNeeded()
@@ -374,29 +387,48 @@ final class SetupPageView: NSView {
     mask.path = final; mask.fillColor = NSColor.white.cgColor; layer.mask = mask
     let unfold = CABasicAnimation(keyPath: "path")
     unfold.fromValue = CGPath(roundedRect: seed, cornerWidth: 32, cornerHeight: 32, transform: nil)
-    unfold.toValue = final; unfold.duration = 0.68
-    unfold.timingFunction = CAMediaTimingFunction(controlPoints: 0.18, 0.72, 0.22, 1)
-    let settle = AtmosPanelPresentation.settle(layer: layer, scales: [0.965, 1.006, 1], keyTimes: [0, 0.74, 1], duration: 0.72)
+    // The supplied 6.32-second clip swells to its crest around 2.5 seconds.
+    // Let the surface form with that swell, then settle into its quiet tail.
+    unfold.toValue = final; unfold.duration = 2.6
+    unfold.beginTime = mask.convertTime(startTime+0.15, from: nil); unfold.fillMode = .backwards
+    unfold.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0, 0.25, 1)
+    let settle = AtmosPanelPresentation.settle(layer: layer, scales: [0.985, 1], keyTimes: [0, 1], duration: 3.4)
+    settle.beginTime = layer.convertTime(startTime, from: nil); settle.fillMode = .backwards
+    let arrival = CABasicAnimation(keyPath: "opacity")
+    arrival.fromValue = 0; arrival.toValue = 1; arrival.duration = 0.9
+    arrival.beginTime = layer.convertTime(startTime, from: nil); arrival.fillMode = .backwards
     CATransaction.begin()
     CATransaction.setCompletionBlock { [weak layer] in layer?.mask = nil }
     mask.add(unfold, forKey: "formingAtmosphere"); layer.add(settle, forKey: "settlingAtmosphere")
+    layer.add(arrival, forKey: "arrivingAtmosphere")
     CATransaction.commit()
-    // The artwork leads; the words and controls arrive in a short, ordered wave.
-    let now = CACurrentMediaTime()
+    // Text resolves through the musical rise; both controls arrive together.
     var index = 0
     func reveal(_ view: NSView) {
       if view is NSTextField || view === next || view === previous {
         view.wantsLayer = true
         let move = CABasicAnimation(keyPath: "transform.translation.y")
-        move.fromValue = -7; move.toValue = 0
+        move.fromValue = -4; move.toValue = 0
         let fade = CABasicAnimation(keyPath: "opacity"); fade.fromValue = 0; fade.toValue = 1
         let group = CAAnimationGroup(); group.animations = [move, fade]
-        group.beginTime = now + 0.12 + Double(index)*0.045; group.duration = 0.30
+        let control = view === next || view === previous
+        let offset = control ? 2.5 : 0.95 + Double(min(index, 2))*0.4
+        group.beginTime = view.layer?.convertTime(startTime+offset, from: nil) ?? startTime+offset
+        group.duration = control ? 0.85 : 1.05
         group.fillMode = .backwards; group.timingFunction = CAMediaTimingFunction(name: .easeOut)
         view.layer?.add(group, forKey: "settlingContent"); index += 1
       } else { for child in view.subviews { reveal(child) } }
     }
     for child in subviews where !(child is AtmosPanelSurface) { reveal(child) }
+  }
+  func finishEntrance() {
+    layer?.mask = nil
+    for key in ["settlingAtmosphere", "arrivingAtmosphere", "accessibleEntrance"] { layer?.removeAnimation(forKey: key) }
+    func finish(_ view: NSView) {
+      view.layer?.removeAnimation(forKey: "settlingContent")
+      view.subviews.forEach(finish)
+    }
+    subviews.forEach(finish)
   }
   private func label(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular,
     color: NSColor = .labelColor) -> NSTextField {
@@ -430,7 +462,7 @@ class AtmosPanelSurface: NSView {
     NSGradient(starting: lower, ending: upper)?.draw(in: shape, angle: 90)
     NSGraphicsContext.saveGraphicsState(); shape.addClip()
     let strength: CGFloat = welcome ? 1 : 0.4
-    let blue = NSColor(srgbRed: 0.37, green: 0.62, blue: 0.93, alpha: (dark ? 0.16 : 0.13) * strength)
+    let blue = AtmosAppearance.accent.withAlphaComponent((dark ? 0.16 : 0.13) * strength)
     NSGradient(starting: blue, ending: blue.withAlphaComponent(0))?
       .draw(in: bounds, relativeCenterPosition: CGPoint(x: -0.72, y: 0.72))
     let sun = NSColor(srgbRed: 1, green: 0.76, blue: 0.43, alpha: (dark ? 0.10 : 0.13) * strength)
@@ -449,8 +481,8 @@ class AtmosPanelSurface: NSView {
 private final class SetupStepsView: NSView {
   var step = 0
   override func draw(_ dirtyRect: NSRect) {
-    for i in 0..<2 {
-      (i == step ? NSColor.controlAccentColor : NSColor.labelColor.withAlphaComponent(0.14)).setFill()
+    for i in 0..<3 {
+      (i == step ? AtmosAppearance.accent : NSColor.labelColor.withAlphaComponent(0.14)).setFill()
       NSBezierPath(ovalIn: CGRect(x: CGFloat(i)*16+2, y: 1, width: 5, height: 5)).fill()
     }
   }
@@ -496,7 +528,9 @@ final class AtmosPrimaryButton: NSButton {
   }
   override func draw(_ dirtyRect: NSRect) {
     let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 18, yRadius: 18)
-    let accent = NSColor.controlAccentColor
+    let ink=AtmosAppearance.onAccent
+    if caption?.textColor != ink {caption?.textColor=ink}
+    let accent = AtmosAppearance.accent
     (isHighlighted ? accent.blended(withFraction: 0.14, of: .black) ?? accent : accent).setFill()
     shape.fill()
     if window?.firstResponder === self {
@@ -555,12 +589,12 @@ private final class SetupPermissionButton: NSButton {
   override func draw(_ dirtyRect: NSRect) {
     let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 2), xRadius: 12, yRadius: 12)
     if isEnabled {
-      NSColor.controlAccentColor.withAlphaComponent(isHighlighted ? 0.16 : 0.07).setFill();shape.fill()
-      NSColor.controlAccentColor.withAlphaComponent(0.16).setStroke();shape.lineWidth = 0.5;shape.stroke()
+      AtmosAppearance.accent.withAlphaComponent(isHighlighted ? 0.16 : 0.07).setFill();shape.fill()
+      AtmosAppearance.accent.withAlphaComponent(0.16).setStroke();shape.lineWidth = 0.5;shape.stroke()
     }
     let text = NSAttributedString(string: isEnabled ? title : "✓ Allowed", attributes: [
       .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-      .foregroundColor: isEnabled ? NSColor.controlAccentColor : NSColor.secondaryLabelColor])
+      .foregroundColor: isEnabled ? AtmosAppearance.accent : NSColor.secondaryLabelColor])
     let size = text.size();text.draw(at: CGPoint(x: (bounds.width-size.width)/2, y: (bounds.height-size.height)/2))
   }
 }
@@ -575,7 +609,7 @@ final class MenuBarGuideView: NSView {
     path.move(to: CGPoint(x: x, y: 46)); path.line(to: CGPoint(x: x, y: 91))
     path.move(to: CGPoint(x: x - 7, y: 83));path.line(to: CGPoint(x: x, y: 91));path.line(to: CGPoint(x: x + 7, y: 83))
     path.lineWidth = 3; path.lineCapStyle = .round;path.lineJoinStyle = .round
-    NSColor.controlAccentColor.setStroke(); path.stroke()
+    AtmosAppearance.accent.setStroke(); path.stroke()
     let pill = NSBezierPath(roundedRect: CGRect(x: 18, y: 6, width: 174, height: 32), xRadius: 16, yRadius: 16)
     NSColor.windowBackgroundColor.setFill();pill.fill()
     let text = NSAttributedString(string: "Your atmosphere is here", attributes: [

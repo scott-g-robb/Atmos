@@ -26,6 +26,25 @@ private final class RetryLocation: WeatherLocationClient {
 }
 
 final class WeatherRetry61Tests: XCTestCase {
+  @MainActor func testScheduledWeatherCheckRenewsLocationAndKeepsLastSceneWhileWaiting() async throws {
+    let restore=savePreferences();defer{restore()}
+    let location=RetryLocation()
+    var calls=0
+    let weather=LiveWeather(makeLocation:{location},appleAvailable:{false},
+      requestWeather:{_,_,_ in calls+=1;return self.reading(code:calls==1 ? 51:3)},
+      observesNetwork:false,resolvesNames:false,timing:LiveWeather.Timing(refreshInterval:0.08))
+    defer{weather.stop()}
+    location.onRequest={if location.requests==1 {location.succeed()}}
+    weather.setEnabled(true);try await waitForReading(weather)
+    let previous=weather.current
+    for _ in 0..<100 where location.requests<2 {try await Task.sleep(nanoseconds:5_000_000)}
+    XCTAssertEqual(location.requests,2,"A normal refresh must ask for a new fix even while the previous fix is recent")
+    XCTAssertTrue(weather.isLocating)
+    XCTAssertEqual(weather.current,previous,"Neither location lookup nor a pending fetch replaces the active scene")
+    location.succeed()
+    for _ in 0..<100 where calls<2 {try await Task.sleep(nanoseconds:5_000_000)}
+    XCTAssertEqual(calls,2);XCTAssertEqual(weather.current?.weatherCode,3)
+  }
   private func reading(code:Int=51) -> WeatherRequest.Reading {
     .openMeteo(WeatherSnapshot(time:Date().timeIntervalSince1970,weatherCode:code,
       temperature:12,windSpeed:10,windDirection:270,precipitation:0.2,isDay:1))

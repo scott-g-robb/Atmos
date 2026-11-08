@@ -4,6 +4,8 @@
 use core::slice;
 mod atmosphere;
 mod liquid_emission;
+#[cfg(test)]
+mod liquid_reference;
 mod pile_interaction;
 mod snow;
 mod water_fields;
@@ -982,6 +984,42 @@ mod airflow_tests {
     }
 }
 
+/// Four independent IEEE divisions in one vector instruction. This preserves
+/// each scalar result, including the pair's mass weights, on both shipped CPUs.
+#[inline(always)]
+fn liquid_quotients(dx: f32, dy: f32, mj: f32, mi: f32, distance: f32) -> [f32; 4] {
+    let numerator = [dx, dy, mj, mi];
+    let denominator = [distance, distance, mi + mj, mi + mj];
+    let mut result = [0.0; 4];
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use core::arch::aarch64::*;
+        vst1q_f32(
+            result.as_mut_ptr(),
+            vdivq_f32(
+                vld1q_f32(numerator.as_ptr()),
+                vld1q_f32(denominator.as_ptr()),
+            ),
+        );
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use core::arch::x86_64::*;
+        _mm_storeu_ps(
+            result.as_mut_ptr(),
+            _mm_div_ps(
+                _mm_loadu_ps(numerator.as_ptr()),
+                _mm_loadu_ps(denominator.as_ptr()),
+            ),
+        );
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    for axis in 0..4 {
+        result[axis] = numerator[axis] / denominator[axis];
+    }
+    result
+}
+
 /// Interacting free liquid: local pressure projection, cohesion, viscosity and a
 /// solid pointer boundary. A spatial hash bounds neighbourhood work. All transfers
 /// conserve pair momentum; no splash count, launch speed or animation is selected.
@@ -1010,19 +1048,96 @@ pub unsafe extern "C" fn sh_couple_liquid(
     let mut starts = [0usize; 4097];
     let mut cursor = [0usize; 4096];
     let mut members = [0u16; 8192];
+    let mut cells = [[0i32; 2]; 8192];
+    let mut buckets = [0u16; 8192];
+    let mut future = [0u16; 4096];
+    #[inline(always)]
+    fn pair(
+        p: &mut [Particle],
+        cells: &mut [[i32; 2]; 8192],
+        i: usize,
+        j: usize,
+        xx: i32,
+        yy: i32,
+        dt: f32,
+        pass: usize,
+        weight: f32,
+    ) {
+        let dx = p[j].rect[0] - p[i].rect[0];
+        let dy = p[j].rect[1] - p[i].rect[1];
+        let d2 = dx * dx + dy * dy;
+        if d2 < 0.000001 || d2 >= 36.0 {
+            return;
+        }
+        let rest = (p[i].rect[2] + p[j].rect[2]) * 0.43;
+        let reach = (rest * 3.0).min(6.0);
+        if d2 >= reach * reach {
+            return;
+        }
+        if cells[j][0] != xx || cells[j][1] != yy {
+            return;
+        }
+        let d = unsafe { sqrtf(d2) };
+        let mi = p[i].life[2].max(0.001);
+        let mj = p[j].life[2].max(0.001);
+        let [nx, ny, wi, wj] = liquid_quotients(dx, dy, mj, mi, d);
+        let correction = if d < rest {
+            (d - rest) * 0.45 * weight
+        } else {
+            (d - rest) * dt * 18.0 * weight
+        };
+        let correction = correction.clamp(-1.2, 0.65);
+        p[i].rect[0] += nx * correction * wi;
+        p[i].rect[1] += ny * correction * wi;
+        p[j].rect[0] -= nx * correction * wj;
+        p[j].rect[1] -= ny * correction * wj;
+        // Only an interacting pair moves this future particle.
+        // Cache its exact live cell after that move, avoiding
+        // repeated coordinate division on every rejected probe.
+        // i's query cell remains fixed through its original pass.
+        cells[j] = [(p[j].rect[0] / 6.0) as i32, (p[j].rect[1] / 6.0) as i32];
+        let dv = correction / dt.max(0.004) * 0.65;
+        p[i].motion[0] += nx * dv * wi;
+        p[i].motion[1] += ny * dv * wi;
+        p[j].motion[0] -= nx * dv * wj;
+        p[j].motion[1] -= ny * dv * wj;
+        if pass == 0 {
+            let sx = p[j].motion[0] - p[i].motion[0];
+            let sy = p[j].motion[1] - p[i].motion[1];
+            let shear2 = sx * sx + sy * sy;
+            let aeration = if shear2 > 14400.0 {
+                ((unsafe { sqrtf(shear2) } - 120.0) / 550.0).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            p[i].life[3] = p[i].life[3].max(aeration);
+            p[j].life[3] = p[j].life[3].max(aeration);
+            for axis in 0..2 {
+                let visc = (p[j].motion[axis] - p[i].motion[axis])
+                    * (1.0 - d / reach)
+                    * (0.07 * weight).min(0.2);
+                p[i].motion[axis] += visc * wi;
+                p[j].motion[axis] -= visc * wj;
+            }
+        }
+    }
+
     fn hash(x: i32, y: i32) -> usize {
         ((x.wrapping_mul(73856093) ^ y.wrapping_mul(19349663)) as usize) & 4095
     }
     for pass in 0..if liquid_count > 2048 { 2 } else { 3 } {
         counts.fill(0);
-        for item in p.iter_mut() {
+        future.fill(0);
+        for (i, item) in p.iter_mut().enumerate() {
             if item.motion[3] != 9.0 {
                 continue;
             }
             if pass == 0 {
                 item.life[3] *= foam_decay;
             }
-            counts[hash((item.rect[0] / 6.0) as i32, (item.rect[1] / 6.0) as i32)] += 1;
+            cells[i] = [(item.rect[0] / 6.0) as i32, (item.rect[1] / 6.0) as i32];
+            buckets[i] = hash(cells[i][0], cells[i][1]) as u16;
+            counts[buckets[i] as usize] += 1;
         }
         starts[0] = 0;
         for cell in 0..4096 {
@@ -1033,7 +1148,7 @@ pub unsafe extern "C" fn sh_couple_liquid(
             if p[i].motion[3] != 9.0 {
                 continue;
             }
-            let cell = hash((p[i].rect[0] / 6.0) as i32, (p[i].rect[1] / 6.0) as i32);
+            let cell = buckets[i] as usize;
             members[cursor[cell]] = i as u16;
             cursor[cell] += 1;
         }
@@ -1041,98 +1156,66 @@ pub unsafe extern "C" fn sh_couple_liquid(
             if p[i].motion[3] != 9.0 {
                 continue;
             }
-            let gx = (p[i].rect[0] / 6.0) as i32;
-            let gy = (p[i].rect[1] / 6.0) as i32;
+            future[buckets[i] as usize] += 1;
+            let gx = cells[i][0];
+            let gy = cells[i][1];
             for yy in gy - 1..=gy + 1 {
                 for xx in gx - 1..=gx + 1 {
                     let cell = hash(xx, yy);
                     let population = counts[cell];
-                    let probes = if population > 16 {
-                        if liquid_count > 2048 { 4 } else { 6 }
-                    } else {
-                        population
-                    };
-                    if probes == 0 {
+                    // Members are inserted in ascending particle order. A
+                    // single prefix cursor per bucket tracks processed indices.
+                    // Skip an exhausted bucket before phase division/loads.
+                    if future[cell] as usize == population {
                         continue;
                     }
-                    // Exact for sparse cells. In crowded cells sample uniformly across
-                    // the entire contiguous population, never an unbounded linked list.
-                    // Paired updates retain momentum; all particles still render/move.
-                    let phase = (i.wrapping_mul(13) + pass * 7) % population;
-                    let weight = (population as f32 / probes as f32).min(4.0);
-                    for k in 0..probes {
-                        // Sparse cells use every member; crowded cells use the same
-                        // four/six uniform samples. The offset wraps at most once.
-                        let stride = if probes == population {
-                            k
-                        } else if probes == 4 {
-                            k * population / 4
-                        } else {
-                            k * population / 6
-                        };
-                        let offset = phase + stride;
-                        let j = members[starts[cell]
-                            + if offset >= population {
+                    let phase = (i * 13 + pass * 7) % population;
+                    let start = starts[cell];
+                    if population <= 16 {
+                        // A sparse bucket uses every member. Its sorted prefix
+                        // has already been processed; visit only the future
+                        // suffix in the original rotated order, with no per-
+                        // probe wrap, stride calculation or rejected old pairs.
+                        let cut = future[cell] as usize;
+                        for offset in phase.max(cut)..population {
+                            pair(
+                                p,
+                                &mut cells,
+                                i,
+                                members[start + offset] as usize,
+                                xx,
+                                yy,
+                                dt,
+                                pass,
+                                1.0,
+                            );
+                        }
+                        for offset in cut..phase {
+                            pair(
+                                p,
+                                &mut cells,
+                                i,
+                                members[start + offset] as usize,
+                                xx,
+                                yy,
+                                dt,
+                                pass,
+                                1.0,
+                            );
+                        }
+                    } else {
+                        let probes = if liquid_count > 2048 { 4 } else { 6 };
+                        let weight = (population as f32 / probes as f32).min(4.0);
+                        for k in 0..probes {
+                            let offset = phase + k * population / probes;
+                            let offset = if offset >= population {
                                 offset - population
                             } else {
                                 offset
-                            }] as usize;
-                        if j <= i {
-                            continue;
-                        }
-                        let dx = p[j].rect[0] - p[i].rect[0];
-                        let dy = p[j].rect[1] - p[i].rect[1];
-                        let d2 = dx * dx + dy * dy;
-                        if d2 < 0.000001 || d2 >= 36.0 {
-                            continue;
-                        }
-                        if (p[j].rect[0] / 6.0) as i32 != xx || (p[j].rect[1] / 6.0) as i32 != yy {
-                            continue;
-                        }
-                        let rest = (p[i].rect[2] + p[j].rect[2]) * 0.43;
-                        let reach = (rest * 3.0).min(6.0);
-                        if d2 >= reach * reach {
-                            continue;
-                        }
-                        let d = unsafe { sqrtf(d2) };
-                        let nx = dx / d;
-                        let ny = dy / d;
-                        let mi = p[i].life[2].max(0.001);
-                        let mj = p[j].life[2].max(0.001);
-                        let wi = mj / (mi + mj);
-                        let wj = mi / (mi + mj);
-                        let correction = if d < rest {
-                            (d - rest) * 0.45 * weight
-                        } else {
-                            (d - rest) * dt * 18.0 * weight
-                        };
-                        let correction = correction.clamp(-1.2, 0.65);
-                        p[i].rect[0] += nx * correction * wi;
-                        p[i].rect[1] += ny * correction * wi;
-                        p[j].rect[0] -= nx * correction * wj;
-                        p[j].rect[1] -= ny * correction * wj;
-                        let dv = correction / dt.max(0.004) * 0.65;
-                        p[i].motion[0] += nx * dv * wi;
-                        p[i].motion[1] += ny * dv * wi;
-                        p[j].motion[0] -= nx * dv * wj;
-                        p[j].motion[1] -= ny * dv * wj;
-                        if pass == 0 {
-                            let sx = p[j].motion[0] - p[i].motion[0];
-                            let sy = p[j].motion[1] - p[i].motion[1];
-                            let shear2 = sx * sx + sy * sy;
-                            let aeration = if shear2 > 14400.0 {
-                                ((unsafe { sqrtf(shear2) } - 120.0) / 550.0).clamp(0.0, 1.0)
-                            } else {
-                                0.0
                             };
-                            p[i].life[3] = p[i].life[3].max(aeration);
-                            p[j].life[3] = p[j].life[3].max(aeration);
-                            for axis in 0..2 {
-                                let visc = (p[j].motion[axis] - p[i].motion[axis])
-                                    * (1.0 - d / reach)
-                                    * (0.07 * weight).min(0.2);
-                                p[i].motion[axis] += visc * wi;
-                                p[j].motion[axis] -= visc * wj;
+                            let j = members[start + offset] as usize;
+                            if j > i {
+                                pair(p, &mut cells, i, j, xx, yy, dt, pass, weight);
                             }
                         }
                     }

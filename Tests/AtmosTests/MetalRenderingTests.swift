@@ -1302,6 +1302,28 @@ final class MetalRenderingTests: XCTestCase {
     }
   }
 
+  func testLiveHazeCannotMakeFiftyPercentSkyCloudsInvisible() throws {
+    let device=try metalDevice(),queue=try XCTUnwrap(device.makeCommandQueue())
+    let renderer=try WeatherRenderer(device:device,format:.rgba8Unorm,size:SIMD2(960,600),seed:42)
+    var reading=WeatherSnapshot(time:Date().timeIntervalSince1970,weatherCode:2,
+      temperature:6,windSpeed:2,windDirection:108,precipitation:0,isDay:0)
+    reading.cloudCover=50;reading.visibility=12_400;reading.humidity=92
+    var scene=WeatherScene(weather:reading)
+    scene.primary = .mist // A regional warning selects the haze renderer.
+    renderer.setEffect(.mist);renderer.contentTop=572;renderer.simulation.scene=scene
+    for _ in 0..<1200 {renderer.simulation.step(dt:1/120,cursor:SIMD2(-1000,-1000))}
+    XCTAssertLessThan(renderer.simulation.fogAmount,0.1)
+    let target=try texture(device,width:960,height:600)
+    try render(renderer,target:target,queue:queue)
+    let pixels=bytes(target),row=600-Int(renderer.contentTop)+1
+    let visible=(0..<960).filter{pixels[(row*960+$0)*4+3]>16}.count
+    XCTAssertGreaterThan(Double(visible)/960,0.25,"Visibility may soften low haze, but must not dim the overhead cloud field")
+    if let output=ProcessInfo.processInfo.environment["ATMOS_RENDER_DIR"] {
+      try render(renderer,target:target,queue:queue,background:MTLClearColorMake(0.025,0.025,0.025,1))
+      try export(bytes(target),width:960,height:600,path:"\(output)/clouds-with-light-haze.png")
+    }
+  }
+
   func testProfileFogAndWispsAtNativeResolutionWhenRequested() throws {
     guard let output=ProcessInfo.processInfo.environment["ATMOS_BENCHMARK_DIR"] else {throw XCTSkip("Set ATMOS_BENCHMARK_DIR for native fog profiling")}
     let device=try metalDevice(),queue=try XCTUnwrap(device.makeCommandQueue()),screen=NSScreen.main

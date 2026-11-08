@@ -1,5 +1,17 @@
 import AppKit
 
+/// A quick restore can finish before the minimise grace period expires.
+/// Once an outgoing window has actually left the census, its return is immediate.
+struct WindowDepartureState {
+  private var seenAway = Set<CGWindowID>()
+  mutating func restored(departing: Set<CGWindowID>, visible: Set<CGWindowID>) -> Set<CGWindowID> {
+    seenAway.formUnion(departing.subtracting(visible))
+    let restored = seenAway.intersection(visible).intersection(departing)
+    seenAway.formIntersection(departing.subtracting(restored))
+    return restored
+  }
+}
+
 /// WindowServer notifications invalidate geometry; the idle census still discovers
 /// new windows. Sharing one subscription avoids repeated IPC on every display tick.
 final class WindowChanges {
@@ -9,6 +21,7 @@ final class WindowChanges {
   private(set) var available = false
   private let lock = NSLock()
   private var windows = Set<CGWindowID>()
+  private var deliveryPending = false
   private typealias Notify =
     @convention(c) (UInt32, UnsafeMutableRawPointer?, UInt, UnsafeMutableRawPointer?) -> Void
   private typealias Register = @convention(c) (Notify, UInt32, UnsafeMutableRawPointer?) -> Int32
@@ -25,7 +38,12 @@ final class WindowChanges {
       owner.lock.unlock()
       guard tracked else { return }
     }
+    owner.lock.lock()
+    guard !owner.deliveryPending else { owner.lock.unlock(); return }
+    owner.deliveryPending = true
+    owner.lock.unlock()
     DispatchQueue.main.async {
+      owner.lock.lock(); owner.deliveryPending = false; owner.lock.unlock()
       owner.revision &+= 1
       NotificationCenter.default.post(name: WindowChanges.notification, object: nil)
       #if DEBUG
@@ -38,10 +56,11 @@ final class WindowChanges {
       let register = SkyLight.function("SLSRegisterNotifyProc", as: Register.self)
     else { return }
     let context = Unmanaged.passUnretained(self).toOpaque()
-    available = [UInt32](arrayLiteral: 804, 806, 807, 808, 815, 816, 1327, 1328, 1401, 1404)
-      .allSatisfy {
-        register(Self.callback, $0, context) == 0
-      }
+    // Register every supported event. One unsupported optional notification must
+    // not short-circuit the remaining registrations and force permanent polling.
+    let results = [UInt32](arrayLiteral: 804, 806, 807, 808, 815, 816, 1327, 1328, 1401, 1404)
+      .map { register(Self.callback, $0, context) == 0 }
+    available = results.prefix(6).contains(true)
   }
   /// The shared on-screen census includes all displays, with Atmos's windows excluded.
   func observe(_ ids: Set<CGWindowID>) {

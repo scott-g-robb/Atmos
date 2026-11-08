@@ -32,7 +32,7 @@ final class WindSlider: NSView {
   }
   private func show() {
     slider.doubleValue=max(0,min(100,speed));slider.isEnabled = !automatic
-    let reading=Preferences.weatherUnits.wind(speed)
+    let reading=Preferences.displayUnits.wind(speed)
     caption.stringValue=automatic ? (awaitingWeather ? "Auto · Waiting for weather":"Auto · \(reading)"):reading
     slider.setAccessibilityValueDescription(caption.stringValue)
   }

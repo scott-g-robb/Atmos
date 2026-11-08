@@ -41,6 +41,7 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     var locationTimeout: TimeInterval = 25
     var requestTimeout: TimeInterval = 25
     var retryInterval: (TimeInterval) -> TimeInterval = { $0 }
+    var refreshInterval: TimeInterval = 900
   }
   private let makeLocation: () -> WeatherLocationClient
   private let appleAvailable: () -> Bool
@@ -62,10 +63,12 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
   private var suspended = false
   private var lastRequest = Date.distantPast
   private var locating = false
+  private var fetchAfterLocation = false
   var locationAuthorization: CLAuthorizationStatus {
     ensureLocationManager().authorizationStatus
   }
   var isLocating: Bool { locating }
+  var isRefreshing: Bool { locating || task != nil }
   var isSuspended: Bool { suspended }
   private let session: URLSession = {
     let configuration = URLSessionConfiguration.ephemeral
@@ -162,7 +165,7 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     }
   }
 
-  func refresh(force: Bool = false, automatic: Bool = false) {
+  func refresh(force: Bool = false, automatic: Bool = false, renewLocation: Bool = false) {
     guard enabled, !suspended, !automatic || !recovery.exhausted else { return }
     if automatic, recovery.failedAttempts > 0, timer?.isValid == true { return }
     if !automatic {
@@ -184,20 +187,21 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
       NSApp.activate(ignoringOtherApps: true)
       manager.requestWhenInUseAuthorization()
     case .authorized, .authorizedAlways:
-      if let coordinate, abs(coordinate.timestamp.timeIntervalSinceNow) < 600 {
+      if !renewLocation, let coordinate, abs(coordinate.timestamp.timeIntervalSinceNow) < 600 {
 
         if locationName.hasPrefix("Approximate location:") { resolveName(coordinate) }
         fetch(coordinate.coordinate)
       } else {
         // The last in-memory approximate position can bridge location-service wakeup.
         // A fresh location is still requested, and a move cancels any old-position request.
-        if recovery.isRecovering(), let coordinate,
+        if !renewLocation, recovery.isRecovering(), let coordinate,
           abs(coordinate.timestamp.timeIntervalSinceNow) < 86400
         {
           fetch(coordinate.coordinate)
         }
         locating = true
-        status = "Finding your local weather…"
+        fetchAfterLocation = renewLocation
+        status = current == nil ? "Finding your local weather…" : "Updating your location and weather…"
         let token = generation
         let timeout = Timer(timeInterval: timing.locationTimeout, repeats: false) { [weak self] _ in
           guard let self, enabled, !suspended, generation == token, locating else { return }
@@ -244,6 +248,8 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     locationTimeout?.invalidate()
     locationTimeout = nil
     locating = false
+    let renewWeather = fetchAfterLocation
+    fetchAfterLocation = false
     guard let location = locations.last, location.horizontalAccuracy >= 0,
       abs(location.timestamp.timeIntervalSinceNow) < 600,
       CLLocationCoordinate2DIsValid(location.coordinate)
@@ -258,9 +264,9 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     locationDetail = String(
       format: "Approximate location: %.3f°, %.3f°", location.coordinate.latitude,
       location.coordinate.longitude)
-    locationName = locationDetail
+    if current == nil { locationName = locationDetail }
     resolveName(location)
-    if moved || current == nil || (updatedAt.map { Date().timeIntervalSince($0) > 60 } ?? true) {
+    if renewWeather || moved || current == nil || (updatedAt.map { Date().timeIntervalSince($0) > 60 } ?? true) {
       fetch(location.coordinate)
     }
   }
@@ -311,11 +317,11 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
         }
         guard enabled, !suspended, generation == token, !Task.isCancelled else { return }
         var weather = reading.snapshot
-        var refreshAfter: TimeInterval = 900
+        var refreshAfter = timing.refreshInterval
         switch reading {
         case .apple(let apple):
           appleFailures = 0
-          refreshAfter = 300
+          refreshAfter = timing.refreshInterval
           if let expiry = weather.alerts.map(\.expires).min() {
             refreshAfter = min(refreshAfter, max(30, expiry.timeIntervalSinceNow - 30))
           }
@@ -337,7 +343,7 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
         updatedAt = Date()
         recovery.resetRetries()
         status =
-          "\(weather.condition) · \(Preferences.weatherUnits.temperature(weather.temperature)) · \(Preferences.weatherUnits.wind(weather.windSpeed))"
+          "\(weather.condition) · \(Preferences.displayUnits.temperature(weather.temperature)) · \(Preferences.displayUnits.wind(weather.windSpeed))"
         changed()
         scheduleExpiry()
         scheduleAlertBoundary()
@@ -455,7 +461,7 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
       guard let self else { return }
       self.timer?.invalidate()
       self.timer = nil
-      refresh(force: true, automatic: true)
+      refresh(force: true, automatic: true, renewLocation: !retry)
     }
     timer.tolerance = min(1, delay * 0.05)
     RunLoop.main.add(timer, forMode: .common)
@@ -497,6 +503,7 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
     locationTimeout = nil
     if locating { manager?.stopUpdatingLocation() }
     locating = false
+    fetchAfterLocation = false
   }
 
   private func cancelRequest() {

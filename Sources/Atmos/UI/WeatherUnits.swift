@@ -26,3 +26,35 @@ enum WeatherUnits: String, CaseIterable {
     return miles < 0.1 ? "\(Int((metres / 0.3048).rounded())) ft" : String(format: "%.1f mi", miles)
   }
 }
+
+enum MenuBarStyle: String, CaseIterable {
+  case simple, compact, full
+  var title: String { rawValue.capitalized }
+  func text(for reading: WeatherSnapshot?, units: WeatherUnits) -> String {
+    text(for: reading, units: WeatherDisplayUnits(preset: units))
+  }
+  func text(for reading: WeatherSnapshot?, units: WeatherDisplayUnits) -> String {
+    guard self != .simple, let reading else { return "" }
+    func temperature(_ value: Double?) -> String {
+      guard let value, value.isFinite else { return "—" }
+      return units.temperature(value)
+    }
+    let condition = reading.condition.localizedCapitalized
+    if self == .compact { return temperature(reading.temperature) }
+    return "Feels like \(temperature(reading.apparentTemperature)), \(condition)"
+  }
+}
+
+struct WeatherDisplayUnits: Equatable {
+  var temperatureUnits: WeatherUnits
+  var windUnits: WeatherUnits
+  var rainfallUnits: WeatherUnits
+  var visibilityUnits: WeatherUnits
+  init(preset: WeatherUnits) {
+    temperatureUnits=preset;windUnits=preset;rainfallUnits=preset;visibilityUnits=preset
+  }
+  func temperature(_ value: Double) -> String { temperatureUnits.temperature(value) }
+  func wind(_ value: Double) -> String { windUnits.wind(value) }
+  func rainfall(_ value: Double) -> String { rainfallUnits.rainfall(value) }
+  func visibility(_ value: Double?) -> String? { visibilityUnits.visibility(value) }
+}
