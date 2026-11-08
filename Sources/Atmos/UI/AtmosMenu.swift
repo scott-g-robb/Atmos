@@ -14,11 +14,18 @@ final class AtmosMenuModel: ObservableObject {
   let menu: NSMenu
   let navigation = AtmosMenuNavigation()
   var reading: WeatherSnapshot?
+  var activeScene: WeatherScene?
+  var activeLayers: [WeatherMenuLayer] {
+    (activeScene ?? reading.map { WeatherScene(weather: $0) })?.menuLayers ?? []
+  }
   var place = "Your atmosphere"
   var status = "A little atmosphere on your desktop."
   var provider = "Apple Weather"
   var providerURL = URL(string: "https://weatherkit.apple.com/legal-attribution.html")!
   var attribution: NSImage?
+  var lastUpdateCheck: Date?
+  var updateStatus = "Not checked yet"
+  var updateAvailable = false
   var invoke: (NSMenuItem) -> Void = { _ in }
   var intensityChanged: (Snowfall) -> Void = { _ in }
   var windChanged: (Double) -> Void = { _ in }
@@ -45,9 +52,14 @@ final class AtmosMenuModel: ObservableObject {
     navigation.expandedPreset = nil; navigation.page = ""
     revision += 1
   }
-  func refresh(weather: LiveWeather) {
+  func refresh(weather: LiveWeather, scene: WeatherScene? = nil, updater: AppUpdater? = nil) {
     reading = weather.current; place = weather.locationName; status = weather.status
+    activeScene = reading == nil ? nil : scene ?? reading.map { WeatherScene(weather: $0) }
     provider = weather.provider; providerURL = weather.providerURL; attribution = weather.attributionMark
+    if let updater {
+      lastUpdateCheck = updater.lastCheckedAt; updateStatus = updater.checkStatus
+      updateAvailable = updater.updateAvailable
+    }
     revision += 1
   }
   func item(_ title: String) -> NSMenuItem? { menu.items.first { $0.title.hasPrefix(title) } }
@@ -180,6 +192,11 @@ struct AtmosMenuView: View {
     VStack(spacing: 0) {
       header.padding(.horizontal, 18).padding(.top, 24).padding(.bottom, 12)
       if page.isEmpty { modeSwitcher.padding(.horizontal, 16).padding(.bottom, 8) }
+      if page.isEmpty && live {
+        VStack(spacing: 12) { overview }
+          .padding(.horizontal, 16).padding(.vertical, 4)
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+      } else {
       ScrollView {
         VStack(spacing: 12) {
           if page.isEmpty { overview }
@@ -189,6 +206,7 @@ struct AtmosMenuView: View {
           else { settings }
         }.padding(.horizontal, 16).padding(.vertical, 4)
       }.scrollIndicators(.hidden).id(page)
+      }
       footer.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
     }
     .background(MenuSurface(pointerX: pointerX))
@@ -196,6 +214,7 @@ struct AtmosMenuView: View {
     .animation(animation, value: page)
     .animation(animation, value: category)
     .animation(reduceMotion ? .easeOut(duration: 0.18) : .spring(response: 0.5, dampingFraction: 0.92), value: model.reading != nil)
+    .animation(animation, value: model.activeLayers)
   }
   private var header: some View {
     HStack(spacing: 11) {
@@ -242,24 +261,10 @@ struct AtmosMenuView: View {
           Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(.tertiary).padding(11)
         }
       }.buttonStyle(MenuPressStyle()).help(live ? "Local weather, details and source" : "Switch saved atmospheres")
-      if let reading = model.reading, live {
-        HStack(spacing: 8) {
-          metric("wind", value: "\(Int(reading.windSpeed.rounded()))", unit: "km/h")
-          metric("cloud.fill", value: reading.cloudCover.map { "\(Int($0.rounded()))" } ?? "—", unit: "% cover")
-          metric("drop.fill", value: String(format: "%.1f", reading.precipitationRate), unit: "mm/h")
-        }.transition(.opacity.combined(with: .offset(y: 6)))
+      if model.reading != nil, live {
+        activeEffects.transition(.opacity.combined(with: .offset(y: 6)))
         attribution.transition(.opacity)
       }
-      Button { navigate("manual") } label: {
-        HStack {
-          Image(systemName: "sparkles").foregroundStyle(.blue).frame(width: 26)
-          VStack(alignment: .leading, spacing: 3) {
-            Text("Compose an atmosphere").font(.system(size: 12, weight: .medium))
-            Text("Weather, seasonal drift & wildlife").font(.system(size: 10)).foregroundStyle(.secondary)
-          }
-          Spacer(); Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
-        }.padding(13)
-      }.buttonStyle(MenuPressStyle())
       }
     }
   }
@@ -271,7 +276,8 @@ struct AtmosMenuView: View {
         if live, let reading = model.reading {
           Text(model.place.components(separatedBy: ",").first ?? model.place)
             .font(.system(size: 11, weight: .medium)).lineLimit(1).help(model.place)
-          Text("\(Int(reading.temperature.rounded()))°").font(.system(size: 40, weight: .ultraLight, design: .rounded))
+          Text(Preferences.weatherUnits.temperature(reading.temperature)).font(.system(size: 36, weight: .ultraLight, design: .rounded))
+            .lineLimit(1).minimumScaleFactor(0.8)
           Text(reading.condition.localizedCapitalized).font(.system(size: 11)).foregroundStyle(.secondary)
         } else {
           Text(live ? "Finding your sky…" : model.library.name)
@@ -296,12 +302,42 @@ struct AtmosMenuView: View {
     }.frame(maxWidth: .infinity).padding(16)
       .background(LinearGradient(colors: [.blue.opacity(0.065), .cyan.opacity(0.02), .orange.opacity(0.035)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 22))
   }
-  private func metric(_ symbol: String, value: String, unit: String) -> some View {
-    VStack(spacing: 6) {
-      Image(systemName: symbol).foregroundStyle(.blue.opacity(0.75)).font(.system(size: 14))
-      Text(value).font(.system(size: 16, weight: .medium, design: .rounded))
-      Text(unit).font(.system(size: 9)).foregroundStyle(.secondary)
-    }.frame(maxWidth: .infinity).padding(.vertical, 10).background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 15))
+  private var activeEffects: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("On your desktop").font(.system(size: 10.5, weight: .medium)).foregroundStyle(.secondary)
+      if model.activeLayers.isEmpty {
+        Label("A quiet sky", systemImage: "moon.stars").font(.system(size: 11)).foregroundStyle(.secondary)
+      } else {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 2), spacing: 6) {
+          ForEach(model.activeLayers) { layer in
+            HStack(spacing: 7) {
+              EffectIcon(effect: layer.effect, size: 13).font(.system(size: 13)).foregroundStyle(tint(layer.effect))
+                .frame(width: 16, height: 16).accessibilityHidden(true)
+              Text(layer.title).font(.system(size: 10.5, weight: .medium)).lineLimit(1).minimumScaleFactor(0.85)
+              Spacer(minLength: 0)
+            }.padding(.horizontal, 10).padding(.vertical, 8)
+              .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 11))
+              .accessibilityElement(children: .combine)
+          }
+        }
+      }
+    }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 3)
+      .accessibilityElement(children: .contain).accessibilityLabel("On your desktop")
+  }
+  private func metric(_ measurement: WeatherMenuMeasurement) -> some View {
+    VStack(alignment: .leading, spacing: 5) {
+      Label(measurement.title, systemImage: measurement.symbol)
+        .font(.system(size: 10)).foregroundStyle(.secondary)
+      Text(measurement.value).font(.system(size: 16, weight: .medium, design: .rounded))
+        .lineLimit(1).minimumScaleFactor(0.85)
+      if let detail = measurement.detail {
+        Text(detail).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+      } else if measurement.value == "—" {
+        Text("Not reported").font(.system(size: 9)).foregroundStyle(.secondary)
+      }
+    }.frame(maxWidth: .infinity, alignment: .leading).padding(9)
+      .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 15))
+      .accessibilityElement(children: .combine)
   }
   private func mode(_ title: String, symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {
     Button(action: action) {
@@ -368,8 +404,8 @@ struct AtmosMenuView: View {
         VStack(spacing: 12) {
           HStack { Text("Intensity"); Spacer(); Text(Preferences.snowfall.title).foregroundStyle(.secondary) }.font(.system(size: 11))
           Slider(value: Binding(get: { Double(Preferences.snowfall.rawValue) }, set: { model.intensityChanged(Snowfall(rawValue: Int($0.rounded())) ?? .steady) }), in: 0...Double(Snowfall.allCases.count - 1), step: 1).accessibilityLabel("Intensity")
-          HStack { Text("Wind"); Spacer(); Text("\(Int(Preferences.manualWindSpeed)) km/h").monospacedDigit().foregroundStyle(.secondary) }.font(.system(size: 11))
-          Slider(value: Binding(get: { Preferences.manualWindSpeed }, set: { model.windChanged($0.rounded()) }), in: 0...100).accessibilityLabel("Wind speed")
+          HStack { Text("Wind"); Spacer(); Text(Preferences.weatherUnits.wind(Preferences.manualWindSpeed)).monospacedDigit().foregroundStyle(.secondary) }.font(.system(size: 11))
+          Slider(value: Binding(get: { Preferences.manualWindSpeed }, set: { model.windChanged($0.rounded()) }), in: 0...100).accessibilityLabel("Wind speed").accessibilityValue(Preferences.weatherUnits.wind(Preferences.manualWindSpeed))
           HStack { Text("Cloud coverage"); Spacer(); Text("\(Int((Preferences.manualScene.manualCloudCover ?? 0) * 100))%").monospacedDigit().foregroundStyle(.secondary) }.font(.system(size: 11))
           Slider(value: Binding(get: { Double(Preferences.manualScene.manualCloudCover ?? 0) * 100 }, set: { model.cloudCoverageChanged($0.rounded()) }), in: 0...100).accessibilityLabel("Cloud coverage")
         }.padding(15).background(.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 17))
@@ -444,19 +480,30 @@ struct AtmosMenuView: View {
     }
   }
   private var weatherDetails: some View {
-    VStack(spacing: 13) {
-      hero
+    VStack(spacing: 8) {
+      if let reading = model.reading {
+        HStack(spacing: 10) {
+          Group {
+            if reading.effect == .none {
+              Image(systemName: reading.weatherCode == 0 ? (reading.isDay == 1 ? "sun.max" : "moon.stars") : (reading.isDay == 1 ? "cloud.sun" : "cloud.moon"))
+            } else { EffectIcon(effect: reading.effect, size: 24) }
+          }.font(.system(size: 24)).foregroundStyle(.blue)
+          VStack(alignment: .leading, spacing: 4) {
+            Text(model.place.components(separatedBy: ",").first ?? model.place).font(.system(size: 12, weight: .medium)).lineLimit(1).help(model.place)
+            Text(reading.condition.localizedCapitalized).font(.system(size: 10.5)).foregroundStyle(.secondary)
+          }
+          Spacer(minLength: 0)
+        }.padding(.vertical, 4)
+      } else { hero }
       attribution
       if let reading = model.reading {
-        HStack(spacing: 8) {
-          metric("wind", value: "\(Int(reading.windSpeed.rounded()))", unit: "km/h")
-          metric("humidity", value: reading.humidity.map { "\(Int($0.rounded()))" } ?? "—", unit: "% humidity")
-          metric("thermometer.medium", value: reading.apparentTemperature.map { "\(Int($0.rounded()))°" } ?? "—", unit: "feels like")
+        Text("Weather measurements").font(.system(size: 11, weight: .medium))
+          .frame(maxWidth: .infinity, alignment: .leading)
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 2), spacing: 8) {
+          ForEach(reading.menuMeasurements) { metric($0) }
         }
-        if let visibility = reading.visibilityDescription {
-          Label("Visibility " + visibility, systemImage: "eye").font(.system(size: 10)).foregroundStyle(.secondary)
-        }
-        Text("Observed " + Date(timeIntervalSince1970: reading.time).formatted(date: .omitted, time: .shortened))
+        Text("Observed " + Date(timeIntervalSince1970: reading.time).formatted(date: .omitted, time: .shortened)
+          + (reading.isDay == 1 ? " · Daytime" : " · Nighttime"))
           .font(.system(size: 10)).foregroundStyle(.secondary)
         ForEach(reading.visibleAlerts(), id: \.id) { alert in
           Link(destination: alert.detailsURL) {
@@ -532,7 +579,22 @@ struct AtmosMenuView: View {
         }
       } else {
       HStack {
-        if let update = model.updateItem { command(update, symbol: "arrow.triangle.2.circlepath").frame(maxWidth: .infinity) }
+        if let update = model.updateItem {
+          Button { model.invoke(update) } label: {
+            HStack(spacing: 10) {
+              Image(systemName: "arrow.triangle.2.circlepath").frame(width: 18).foregroundStyle(.secondary)
+              VStack(alignment: .leading, spacing: 2) {
+                Text(update.title).font(.system(size: 11.5))
+                HStack(spacing: 3) {
+                  Text("Last checked at: " + (model.lastUpdateCheck?.formatted(date: .omitted, time: .shortened) ?? "—") + " ·")
+                    .foregroundStyle(.secondary)
+                  Text(model.updateStatus).foregroundStyle(model.updateAvailable ? Color.orange : Color.secondary)
+                }.font(.system(size: 8.5)).lineLimit(1).minimumScaleFactor(0.85)
+              }
+              Spacer(minLength: 0)
+            }.padding(.horizontal, 11).padding(.vertical, 4).contentShape(Rectangle())
+          }.buttonStyle(MenuPressStyle()).disabled(!update.isEnabled).frame(maxWidth: .infinity)
+        }
         Button { model.close(); NSApp.terminate(nil) } label: { Image(systemName: "power").frame(width: 33, height: 31).foregroundStyle(.secondary) }
           .buttonStyle(MenuPressStyle()).keyboardShortcut("q").accessibilityLabel("Quit Atmos").help("Quit Atmos")
       }

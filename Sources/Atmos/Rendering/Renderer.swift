@@ -76,12 +76,7 @@ final class Renderer: NSObject, MTKViewDelegate {
   private var coverFrames: [SIMD4<Float>] = []
   private var coverIDs: [UInt32] = []
   var fogCaptureTime: Double?
-  private var reflectionMotion: ReflectionMotion?
-  private var reflectionMotionUnavailable = false
-  var captureFrameRate: Int {
-    reflectionMotionUnavailable || activity.isActive(now: CACurrentMediaTime())
-      ? nativeFrameRate : budget == .saver ? 20 : 30
-  }
+  var presentationFrameRate: Int { budget == .saver ? min(60,nativeFrameRate):nativeFrameRate }
   func desktopMoved(now: CFTimeInterval) { activity.wake(now: now) }
   var rest: () -> Void = {}
   var dockOverlay: DockOverlay?
@@ -98,6 +93,16 @@ final class Renderer: NSObject, MTKViewDelegate {
         && $0.weather.simulation.water.contains { $0.top > 0.15 && !$0.isOccluded }
     }
   }
+  func reflectionRegions(now: Double) -> [CGRect]? {
+    if activity.isActive(now:now) { return nil }
+    return scenes.flatMap { scene in scene.weather.simulation.water.compactMap { pool in
+      guard scene.weather.simulation.ownsWater,pool.top>0.15,!pool.isOccluded else { return nil }
+      let h=simulation.height,y=pool.origin.y+pool.top
+      let reach=min(420,max(24,h-y))
+      return CGRect(x:CGFloat(pool.origin.x-64),y:CGFloat(h-y-reach-16),
+        width:CGFloat(pool.width+128),height:CGFloat(reach+180))
+    }}
+  }
   var fogAmount: Float { scenes.reduce(0) { max($0, $1.weather.simulation.fogAmount) } }
   var hasFog: Bool { fogAmount > 0.003 }
   var fogBloomTexture: MTLTexture?
@@ -108,7 +113,6 @@ final class Renderer: NSObject, MTKViewDelegate {
   var contentTop: Float = .greatestFiniteMagnitude {
     didSet { for scene in scenes { scene.weather.contentTop = contentTop } }
   }
-  var reflectionFrame: ScreenReflection.Frame?
   var reflectionRect = SIMD4<Float>(0, 0, 1, 1) {
     didSet {
       if reflectionRect != oldValue {
@@ -408,13 +412,13 @@ final class Renderer: NSObject, MTKViewDelegate {
     #endif
     // Presentation and every visible simulation follow this display. Desktop
     // capture can rest independently without freezing the weather itself.
-    if view.preferredFramesPerSecond != nativeFrameRate {
-      view.preferredFramesPerSecond = nativeFrameRate
+    if view.preferredFramesPerSecond != presentationFrameRate {
+      view.preferredFramesPerSecond = presentationFrameRate
     }
     #if DEBUG
       if DebugMetrics.enabled {
         DebugMetrics.pacing =
-          "active:\(activity.isActive(now: now)) reason:\(activity.lastReason) capture:\(captureFrameRate) present:\(nativeFrameRate) sensor_failed:\(reflectionMotionUnavailable)"
+          "active:\(activity.isActive(now: now)) reason:\(activity.lastReason) screenshots:cached present:\(presentationFrameRate)"
       }
     #endif
     let dt = lastTime > 0 ? Float(min(now - lastTime, 0.05)) : 1 / Float(nativeFrameRate)
@@ -436,31 +440,16 @@ final class Renderer: NSObject, MTKViewDelegate {
       semaphore.signal()
       return
     }
-    if reflectionMotion == nil, !reflectionMotionUnavailable, reflectionFrame != nil {
-      do { reflectionMotion = try ReflectionMotion(device: device) } catch {
-        reflectionMotionUnavailable = true
-      }
-    }
-    let motionResult = reflectionFrame.flatMap {
-      reflectionMotion?.encode(texture: $0.texture, into: command, now: now)
-    }
     prepareReflection(command)
     encode(
       into: command, pass: pass, scale: Float(view.drawableSize.width / max(1, view.bounds.width)),
       time: Float((now - epoch).truncatingRemainder(dividingBy: 1000)))
     command.present(drawable)
-    let reflected = reflectionFrame
-    command.addCompletedHandler { [semaphore, reflected, weak self] finished in
+    command.addCompletedHandler { [semaphore] finished in
       #if DEBUG
         DebugMetrics.recordGPU(seconds: finished.gpuEndTime - finished.gpuStartTime)
       #endif
-      let changed = motionResult?.contents().load(as: UInt32.self) ?? 0
-      if changed >= 24 {
-        DispatchQueue.main.async { [weak self] in
-          self?.activity.observeDesktopChange(samples: changed, now: now)
-        }
-      }
-      _ = withExtendedLifetime(reflected) { semaphore.signal() }
+      semaphore.signal()
     }
     command.commit()
     #if DEBUG

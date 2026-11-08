@@ -26,6 +26,10 @@ enum Snowfall: Int, CaseIterable {
 
 enum Preferences {
   private static let defaults = UserDefaults.standard
+  static var weatherUnits: WeatherUnits {
+    get { defaults.string(forKey: "weatherUnits").flatMap(WeatherUnits.init(rawValue:)) ?? .metric }
+    set { defaults.set(newValue.rawValue, forKey: "weatherUnits") }
+  }
   private static let snowfallKey = "snowfall"
   private static let behindWindowsKey = "behindWindows"
   private static let showOverFullScreenKey = "showOverFullScreen"

@@ -8,9 +8,10 @@ def ident(name):return hashlib.sha256(name.encode()).hexdigest()[:24].upper()
 def add(object_key,isa,**fields):
  key=ident(object_key);objects[key]={'isa':isa,**fields};return key
 files=[];builds=[]
-for file in sorted((root/'Sources/Atmos').rglob('*.swift')):
+source_files=sorted((root/'Sources/Atmos').rglob('*.swift'))+[root/'Sources/CWeatherCore/WeatherCore.c']
+for file in source_files:
  path=str(file.relative_to(root))
- ref=add(path,'PBXFileReference',lastKnownFileType='sourcecode.swift',path=path,sourceTree='SOURCE_ROOT')
+ ref=add(path,'PBXFileReference',lastKnownFileType='sourcecode.c.c' if file.suffix=='.c' else 'sourcecode.swift',path=path,sourceTree='SOURCE_ROOT')
  files.append(ref);builds.append(add(path+' build','PBXBuildFile',fileRef=ref))
 product=add('product','PBXFileReference',explicitFileType='wrapper.application',path='Atmos.app',sourceTree='BUILT_PRODUCTS_DIR')
 products=add('products','PBXGroup',children=[product],name='Products',sourceTree='<group>')
@@ -25,10 +26,11 @@ swift "$SRCROOT/scripts/build-icons.swift" "$SRCROOT/Resources/AppIcon.icon/Asse
 iconutil -c icns "$DERIVED_FILE_DIR/AppIcon.iconset" -o "$resources/AppIcon.icns"
 cp "$SRCROOT/LICENSE" "$resources/LICENSE.txt"
 cp "$SRCROOT/NOTICE.md" "$resources/NOTICE.md"
+cp "$SRCROOT/Resources/IntroAudio.mp3" "$resources/IntroAudio.mp3"
 ''')
 configs=[];projectconfigs=[]
 for name in ['Debug','Release']:
- settings={'PRODUCT_NAME':'Atmos','PRODUCT_BUNDLE_IDENTIFIER':'dev.grobb.Atmos','DEVELOPMENT_TEAM':'8QDD68TVRK','CODE_SIGN_STYLE':'Automatic','CODE_SIGN_ENTITLEMENTS':'Resources/WeatherKit.entitlements','INFOPLIST_FILE':'Resources/Info.plist','GENERATE_INFOPLIST_FILE':'NO','MACOSX_DEPLOYMENT_TARGET':'14.0','SDKROOT':'macosx','SUPPORTED_PLATFORMS':'macosx','SWIFT_VERSION':'5.0','SWIFT_OPTIMIZATION_LEVEL':'-Onone' if name=='Debug' else '-O','SWIFT_COMPILATION_MODE':'wholemodule' if name=='Release' else 'singlefile','ENABLE_HARDENED_RUNTIME':'YES','ENABLE_USER_SCRIPT_SANDBOXING':'NO','OTHER_SWIFT_FLAGS':['$(inherited)','-I','$(SRCROOT)/Sources/CWeatherCore/include'],'LIBRARY_SEARCH_PATHS':['$(inherited)','$(SRCROOT)/.build/weather-core'],'OTHER_LDFLAGS':['$(inherited)','-latmos_weather_core'],'LD_RUNPATH_SEARCH_PATHS':['$(inherited)','@executable_path/../Frameworks'],'COMBINE_HIDPI_IMAGES':'YES'}
+ settings={'PRODUCT_NAME':'Atmos','PRODUCT_BUNDLE_IDENTIFIER':'dev.grobb.Atmos','DEVELOPMENT_TEAM':'8QDD68TVRK','CODE_SIGN_STYLE':'Automatic','CODE_SIGN_ENTITLEMENTS':'Resources/WeatherKit.entitlements','INFOPLIST_FILE':'Resources/Info.plist','GENERATE_INFOPLIST_FILE':'NO','MACOSX_DEPLOYMENT_TARGET':'14.0','SDKROOT':'macosx','SUPPORTED_PLATFORMS':'macosx','SWIFT_VERSION':'5.0','SWIFT_OPTIMIZATION_LEVEL':'-Onone' if name=='Debug' else '-O','SWIFT_COMPILATION_MODE':'wholemodule' if name=='Release' else 'singlefile','ENABLE_HARDENED_RUNTIME':'YES','ENABLE_USER_SCRIPT_SANDBOXING':'NO','OTHER_SWIFT_FLAGS':['$(inherited)','-I','$(SRCROOT)/Sources/CWeatherCore/include'],'HEADER_SEARCH_PATHS':['$(inherited)','$(SRCROOT)/Sources/CWeatherCore/include'],'LIBRARY_SEARCH_PATHS':['$(inherited)','$(SRCROOT)/.build/weather-core'],'OTHER_LDFLAGS':['$(inherited)','-latmos_weather_core'],'LD_RUNPATH_SEARCH_PATHS':['$(inherited)','@executable_path/../Frameworks'],'COMBINE_HIDPI_IMAGES':'YES'}
  configs.append(add('target '+name,'XCBuildConfiguration',name=name,buildSettings=settings))
  projectconfigs.append(add('project '+name,'XCBuildConfiguration',name=name,buildSettings={'CLANG_ENABLE_MODULES':'YES','MACOSX_DEPLOYMENT_TARGET':'14.0','SDKROOT':'macosx'}))
 targetlist=add('targetconfigs','XCConfigurationList',buildConfigurations=configs,defaultConfigurationIsVisible=0,defaultConfigurationName='Release')

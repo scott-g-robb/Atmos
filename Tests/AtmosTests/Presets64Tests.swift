@@ -86,7 +86,7 @@ final class Presets64Tests: XCTestCase {
   }
   @MainActor func testKitPermissionProofRecoversAStalePreflightWithoutStartingCapture() async throws {
     var calls=0
-    let access=ScreenRecordingAccess(preflight:{false},probe:{calls+=1})
+    let access=ScreenshotAccess(preflight:{false},probe:{calls+=1})
     XCTAssertFalse(access.isGranted);XCTAssertEqual(calls,0)
     access.recheck();access.recheck()
     for _ in 0..<100 {
@@ -98,7 +98,7 @@ final class Presets64Tests: XCTestCase {
     XCTAssertFalse(access.isGranted);XCTAssertEqual(access.state,.authorizationNeeded)
   }
   @MainActor func testPermissionProbeFailureDoesNotClaimAccess() async throws {
-    let access=ScreenRecordingAccess(preflight:{false},probe:{throw URLError(.noPermissionsToReadFile)})
+    let access=ScreenshotAccess(preflight:{false},probe:{throw URLError(.noPermissionsToReadFile)})
     access.recheck()
     for _ in 0..<100 {
       if access.state != .checking {break}

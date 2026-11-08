@@ -1,3 +1,4 @@
+import CWeatherCore
 import CoreGraphics
 import Foundation
 import simd
@@ -5,23 +6,8 @@ import simd
 /// Small flocks with approach, landing, perched and takeoff phases. Perches follow
 /// their actual windows; disappearing or occluded support immediately releases the bird.
 final class BirdFlock {
-  private struct Bird {
-    var position: SIMD2<Float>
-    var velocity: SIMD2<Float>
-    var species: Int
-    var seed: Float
-    var facing: Float = 1
-    var age: Float = 0
-    var phase: Float = 0
-    var perch: CGWindowID?
-    var perchX: Float = 0.5
-    var rest: Float = 0
-    var restLimit: Float = 10
-    var leaving = false
-    var lastSupport: SIMD2<Float>?
-    var supportVelocity = SIMD2<Float>.zero
-    var supportSeenAt: Float = 0
-  }
+  private typealias Bird = SHBird
+  private var targets: [SHBirdTarget] = []
   private var randomState: UInt64
   init(seed: UInt64 = UInt64.random(in: 1...UInt64.max)) { randomState = max(1, seed) }
   private func random() -> Float {
@@ -98,84 +84,31 @@ final class BirdFlock {
             perch: perch, perchX: perchX, restLimit: 5+random()*13))
       }
     }
-    particles.removeAll(keepingCapacity: true)
-    for i in birds.indices {
-      var bird = birds[i]
-      bird.age += dt
-      if abs(bird.velocity.x) > 2 { bird.facing = bird.velocity.x < 0 ? -1 : 1 }
-      let support = bird.perch.flatMap { id in surfaces.first { $0.id == id } }
-      var target: SIMD2<Float>?
-      if let support {
-        let x = Float(support.frame.minX) + Float(support.frame.width) * bird.perchX
-        let y = Float(support.frame.maxY) + 5
-        let blocked = support.blockers.contains {
-          $0.insetBy(dx: -8, dy: -12).contains(CGPoint(x: CGFloat(x), y: CGFloat(y)))
+    targets.removeAll(keepingCapacity:true)
+    for bird in birds {
+      var target=SHBirdTarget()
+      if let id=bird.perch,let support=surfaces.first(where:{$0.id==id}) {
+        let x=Float(support.frame.minX)+Float(support.frame.width)*bird.perchX
+        let y=Float(support.frame.maxY)+5
+        if !support.blockers.contains(where:{$0.insetBy(dx:-8,dy:-12).contains(CGPoint(x:CGFloat(x),y:CGFloat(y)))}) {
+          target.point=SIMD2(x,y);target.available=1
         }
-        if !blocked { target = SIMD2(x, y) }
       }
-      var startled = false
-      if let target {
-        if let previous = bird.lastSupport, simd_distance(previous, target) > 0.2 {
-          // Window geometry arrives less often than display frames. Cap a long
-          // stationary interval so the first shake is not averaged over the whole rest.
-          let interval = max(dt, min(0.12, elapsed - bird.supportSeenAt))
-          let velocity = simd_clamp((target - previous) / interval, SIMD2(-1200,-900), SIMD2(1200,900))
-          let acceleration = simd_length(velocity - bird.supportVelocity) / interval
-          startled = bird.phase == 1 && (simd_length(velocity) > 340
-            || (acceleration > 3200 && simd_length(velocity - bird.supportVelocity) > 120))
-          bird.supportVelocity = velocity; bird.supportSeenAt = elapsed
-        }
-        if bird.lastSupport == nil { bird.supportSeenAt = elapsed }
-        bird.lastSupport = target
-      }
-      if startled {
-        bird.velocity = bird.supportVelocity * 0.35 + SIMD2(bird.facing * 80, 70)
-        target = nil
-      }
-      if !active || startled || (bird.perch != nil && target == nil)
-        || simd_distance(cursor, bird.position) < 50 || bird.rest > bird.restLimit
-      {
-        bird.leaving = true
-        bird.perch = nil
-        bird.phase = 0
-      }
-      if bird.phase == 1, let target {
-        bird.position = target
-        bird.velocity = .zero
-        bird.rest += dt
-      } else {
-        let local = airflow?.sample(bird.position) ?? SIMD2(wind, 0)
-        var desired = SIMD2(
-          (bird.velocity.x < 0 ? -1 : 1) * 105 + local.x * 0.15,
-          sin(elapsed * 1.7 + bird.seed * 31) * 9 + local.y * 0.12)
-        if let target, !bird.leaving {
-          let delta = target - bird.position
-          let distance = simd_length(delta)
-          desired = delta / max(1, distance) * min(125, max(14, distance * 1.8))
-          if distance < 8 {
-            bird.phase = 1
-            bird.position = target
-            bird.velocity = .zero
+      targets.append(target)
+    }
+    if particles.count != birds.count {particles=Array(repeating:WeatherParticle(),count:birds.count)}
+    let cells=airflow?.cells ?? [],columns=airflow?.columns ?? 0,rows=airflow?.rows ?? 0
+    let spacing=airflow?.spacing ?? 48,base=airflow?.base ?? wind
+    let count=birds.withUnsafeMutableBufferPointer { birds in
+      targets.withUnsafeBufferPointer { targets in
+        particles.withUnsafeMutableBufferPointer { particles in
+          cells.withUnsafeBufferPointer { cells in
+            sh_step_birds(birds.baseAddress,birds.count,targets.baseAddress,particles.baseAddress,dt,elapsed,
+              size.x,size.y,wind,active ? 1:0,cursor.x,cursor.y,cells.baseAddress,columns,rows,spacing,base)
           }
-        } else if bird.leaving {
-          desired.y = 55
         }
-        bird.velocity += (desired - bird.velocity) * min(1, dt * 3)
-        if bird.phase != 1 { bird.position += bird.velocity * dt }
       }
-      particles.append(
-        WeatherParticle(
-          rect: SIMD4(
-            bird.position.x, bird.position.y, bird.species == 3 ? 33 : 28 + bird.seed * 2,
-            bird.species == 3 ? 25 : 27),
-          motion: SIMD4(bird.velocity.x, bird.velocity.y, bird.seed, 14),
-          color: SIMD4(0.24, 0.28, 0.33, min(1, bird.age * 2)),
-          life: SIMD4(2, 10000, bird.facing * Float(bird.species + 1), bird.phase)))
-      birds[i] = bird
     }
-    birds.removeAll {
-      $0.age > 48 || $0.position.x < -200 || $0.position.x > size.x + 200
-        || $0.position.y > size.y + 80
-    }
+    if count<birds.count {birds.removeLast(birds.count-count);particles.removeLast(particles.count-count)}
   }
 }

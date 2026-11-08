@@ -45,8 +45,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var screenReflectionsToggle: NSMenuItem!
   private var fogBloomItem: NSMenuItem!
   private var fogPermissionItem: NSMenuItem!
-  private let updater = AppUpdater()
+  private let updater: AppUpdater
+  private let updateBadge = UpdateBadgeView(frame: .zero)
   private var updateItem: NSMenuItem!
+  private var unitItems: [WeatherUnits: NSMenuItem] = [:]
   private var automaticUpdateItem: NSMenuItem!
   private var setupPending = false
   private var setupWeatherPreparing = false
@@ -66,14 +68,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private let weather: LiveWeather
 
   override convenience init() { self.init(weather: LiveWeather()) }
-  init(weather: LiveWeather) {
+  init(weather: LiveWeather, updater: AppUpdater = AppUpdater()) {
     self.weather = weather
+    self.updater = updater
     super.init()
     weather.changed = { [weak self] in self?.applyWeather() }
     weather.failureLimitReached = { Preferences.liveWeather = false }
-    ScreenRecordingAccess.shared.changed = { [weak self] in
+    ScreenshotAccess.shared.changed = { [weak self] in
       guard let self else { return }
-      if ScreenRecordingAccess.shared.isGranted { screens.forEach { $0.refreshCapturePermission() } }
+      if ScreenshotAccess.shared.isGranted { screens.forEach { $0.refreshCapturePermission() } }
       if statusItem != nil { refreshCustomMenu() }
     }
   }
@@ -225,14 +228,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       SetupPermission(kind: .location, title: "Location", detail: "Follow the weather where you are, automatically.",
         symbol: "location", action: location == .notDetermined ? "Allow" : "Settings…",
         granted: location == .authorized || location == .authorizedAlways),
-      SetupPermission(kind: .screen, title: "Screen Recording",
-        detail: "Desktop reflections and colour-matched fog bloom. Images stay on this Mac; no audio.",
-        symbol: "rectangle.on.rectangle", action: "Allow", granted: ScreenRecordingAccess.shared.isGranted),
+      SetupPermission(kind: .screen, title: "Screenshot Access",
+        detail: "Occasional screenshots for water reflections and fog glow. macOS manages this in Screen & System Audio Recording. No video or audio is recorded.",
+        symbol: "rectangle.on.rectangle", action: "Allow", granted: ScreenshotAccess.shared.isGranted),
       SetupPermission(kind: .login, title: "Open at Login · Optional",
         detail: "A little atmosphere, ready whenever you sign in.", symbol: "arrow.right.circle",
         action: login == .requiresApproval ? "Settings…" : "Enable", granted: login == .enabled),
       SetupPermission(kind: .automaticUpdates, title: "Automatic Updates · Optional",
-        detail: "Quietly check, install and reopen Atmos in the background. No update windows.",
+        detail: "Install and reopen Atmos quietly. Update checks always run; this enables automatic installation.",
         symbol: "arrow.triangle.2.circlepath", action: "Enable", granted: Preferences.automaticUpdates),
     ]
   }
@@ -244,8 +247,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         weather.requestLocationAccess()
       } else { openLocationSettings() }
     case .screen:
-      if !ScreenRecordingAccess.shared.isGranted && !CGRequestScreenCaptureAccess() { openScreenRecordingSettings() }
-      else { ScreenRecordingAccess.shared.recheck() }
+      if !ScreenshotAccess.shared.isGranted && !CGRequestScreenCaptureAccess() { openScreenRecordingSettings() }
+      else { ScreenshotAccess.shared.recheck() }
       screens.forEach { $0.setReflections(Preferences.screenReflections); $0.setFogBloom(Preferences.fogBloom) }
     case .login:
       if SMAppService.mainApp.status == .requiresApproval { openLoginSettings() }
@@ -265,8 +268,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   func makeStatusItem() -> NSStatusItem {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     statusItem = item
-    item.button?.image = EffectArtwork.statusImage(for: statusEffect)
-    item.button?.setAccessibilityLabel("Atmos")
+    updateBadge.isHidden = true
+    updateBadge.autoresizingMask = [.minXMargin, .minYMargin, .maxYMargin]
+    updateBadge.setAccessibilityElement(false)
+    item.button?.addSubview(updateBadge)
+    updateStatusIcon()
 
     let menu = NSMenu()
     menu.delegate = self
@@ -362,13 +368,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     snapshotReflectionsItem = add(
       "Window Snapshots", #selector(selectSnapshotReflections), to: reflections)
     snapshotReflectionsItem.toolTip =
-      "Cached window images follow window movement smoothly. Content refreshes once a second; no continuous screen recording."
-    liveReflectionsItem = add("Live Desktop", #selector(selectLiveReflections), to: reflections)
+      "Cached window images follow window movement smoothly. Content refreshes every 10 seconds and on changes; no video stream."
+    liveReflectionsItem = add("Desktop Screenshots", #selector(selectLiveReflections), to: reflections)
     liveReflectionsItem.toolTip =
-      "Reflect videos and all desktop animation at the display refresh rate. Uses more energy."
+      "Cached desktop and window images follow live geometry at native refresh. Screenshots refresh every 10 seconds."
     reflections.addItem(.separator())
     reflectionPermissionItem = add(
-      "Allow Screen Recording…", #selector(allowReflections), to: reflections)
+      "Allow Screenshot Access…", #selector(allowReflections), to: reflections)
     reflectionStatusItem = reflections.addItem(
       withTitle: "Wallpaper reflections", action: nil, keyEquivalent: "")
     reflectionStatusItem.isEnabled = false
@@ -381,14 +387,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     permissions.autoenablesItems = false
     permissions.delegate = self
     screenPermissionItem = add(
-      "Screen Recording", #selector(openScreenRecordingSettings), to: permissions)
+      "Screenshot Access", #selector(openScreenRecordingSettings), to: permissions)
     locationPermissionItem = add(
       "Location Services", #selector(openLocationSettings), to: permissions)
     loginPermissionItem = add("Open at Login", #selector(openLoginSettings), to: permissions)
     permissions.addItem(.separator())
     permissionRequestItem = add(
-      "Allow Screen Recording…", #selector(allowReflections), to: permissions)
-    add("Recheck Screen Recording", #selector(recheckScreenRecording), to: permissions)
+      "Allow Screenshot Access…", #selector(allowReflections), to: permissions)
+    add("Recheck Screenshot Access", #selector(recheckScreenRecording), to: permissions)
     add("Restart Atmos…", #selector(restartAtmos), to: permissions)
     settings.addItem(withTitle: "Permissions & Activity", action: nil, keyEquivalent: "").submenu =
       permissions
@@ -397,7 +403,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     screenReflectionsToggle.toolTip =
       "Use captured desktop content in water. Fog Bloom has its own capture control."
     fogBloomItem = add("Fog Bloom", #selector(toggleFogBloom), to: settings)
-    fogBloomItem.toolTip = "Scatter the colours of windows, desktop icons and effects through visible fog. Uses Screen Recording."
+    fogBloomItem.toolTip = "Scatter the colours of windows, desktop icons and effects through visible fog. Uses occasional screenshots."
     fogPermissionItem = add("Allow Fog Bloom…", #selector(allowFogBloom), to: settings)
     waterReflectionMenuItem = settings.addItem(
       withTitle: "Water Reflection Source", action: nil, keyEquivalent: "")
@@ -410,6 +416,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     fullScreenItem = add("Show over Full Screen", #selector(toggleFullScreen), to: settings)
     screenshotsItem = add("Include in Screenshots", #selector(toggleScreenshots), to: settings)
     settings.addItem(.separator())
+    let units = NSMenu()
+    units.autoenablesItems = false
+    for unit in WeatherUnits.allCases {
+      let item = add(unit.title, #selector(chooseWeatherUnits(_:)), to: units)
+      item.representedObject = unit.rawValue; unitItems[unit] = item
+    }
+    settings.addItem(withTitle: "Units", action: nil, keyEquivalent: "").submenu = units
     loginItem = add("Open at Login", #selector(toggleOpenAtLogin), to: settings)
     automaticUpdateItem = add("Automatic Updates", #selector(toggleAutomaticUpdates), to: settings)
     add("Show Setup…", #selector(showWelcome), to: settings)
@@ -419,6 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     updateItem.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: nil)
     updater.changed = { [weak self] in
       self?.updateItem.title = self?.updater.menuTitle ?? "Check for Updates…"
+      self?.updateStatusIcon()
       self?.refreshCustomMenu()
     }
     menu.addItem(.separator())
@@ -446,9 +460,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       let keepsOpen = ["chooseLiveWeather", "chooseMode:", "chooseWeatherSource:", "refreshWeather",
         "toggleAccumulate", "toggleMeltSnow", "toggleSnowOnWindows", "clearSnow", "toggleFogBloom",
         "toggleScreenReflections", "toggleBehindWindows", "toggleFullScreen", "toggleScreenshots",
-        "toggleOpenAtLogin", "toggleAutomaticUpdates", "selectWallpaperReflections",
+        "toggleOpenAtLogin", "toggleAutomaticUpdates", "chooseWeatherUnits:", "selectWallpaperReflections",
         "selectSnapshotReflections", "selectLiveReflections"].contains(NSStringFromSelector(action))
-      let permissionAction = ["toggleFogBloom", "toggleScreenReflections", "selectSnapshotReflections", "selectLiveReflections"].contains(NSStringFromSelector(action)) && !ScreenRecordingAccess.shared.isGranted
+      let permissionAction = ["toggleFogBloom", "toggleScreenReflections", "selectSnapshotReflections", "selectLiveReflections"].contains(NSStringFromSelector(action)) && !ScreenshotAccess.shared.isGranted
       let locationAction = NSStringFromSelector(action) == "chooseLiveWeather" && !Preferences.liveWeather && weather.locationAuthorization == .notDetermined
       if !keepsOpen || permissionAction || locationAction { self.customMenu?.close() }
       NSApp.sendAction(action, to: item.target, from: item)
@@ -497,21 +511,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     guard let customMenu, let menu = statusMenu, let button = statusItem.button else { return }
     if customMenu.isShown { customMenu.close(); return }
     if Date().timeIntervalSince(customMenu.lastClosed) < 0.18 { return }
-    let captureAccess = ScreenRecordingAccess.shared
+    let captureAccess = ScreenshotAccess.shared
     if captureAccess.returningFromSettings {
       captureAccess.returningFromSettings = false
       captureAccess.recheck()
     }
     welcome?.menuOpened()
     menuNeedsUpdate(menu)
-    customMenu.model.refresh(weather: weather)
+    customMenu.model.refresh(weather: weather, scene: scene, updater: updater)
     customMenu.show(from: button)
   }
 
-  private func refreshCustomMenu() {
+  private func refreshCustomMenu(scene: WeatherScene? = nil) {
     guard let customMenu, customMenu.isShown, let menu = statusMenu else { return }
     menuNeedsUpdate(menu)
-    customMenu.model.refresh(weather: weather)
+    customMenu.model.refresh(weather: weather, scene: scene ?? self.scene, updater: updater)
   }
 
   @discardableResult
@@ -588,7 +602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     surfaceItem.isHidden = !accumulating && effect != .hail
     screenReflectionsToggle.state = Preferences.screenReflections ? .on : .off
     fogBloomItem.state = Preferences.fogBloom ? .on : .off
-    fogPermissionItem.isHidden = !Preferences.fogBloom || ScreenRecordingAccess.shared.isGranted
+    fogPermissionItem.isHidden = !Preferences.fogBloom || ScreenshotAccess.shared.isGranted
     refreshPermissions()
     accumulateItem.title =
       effect.hasBanks
@@ -600,7 +614,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     snowOnWindowsItem.isHidden = !accumulating && effect != .hail
     reflectionsItem.isHidden = false
     reflectionStatusItem.isHidden = false
-    reflectionPermissionItem.isHidden = ScreenRecordingAccess.shared.isGranted
+    reflectionPermissionItem.isHidden = ScreenshotAccess.shared.isGranted
     reflectionStatusItem.title =
       screens.first(where: { $0.isCapturingReflections })?.reflectionStatus ?? screens.first?
       .reflectionStatus ?? "Wallpaper reflections"
@@ -622,6 +636,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     screenshotsItem.state = Preferences.showInScreenshots ? .on : .off
     loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
     automaticUpdateItem.state = Preferences.automaticUpdates ? .on : .off
+    for (unit, item) in unitItems { item.state = unit == Preferences.weatherUnits ? .on : .off }
   }
 
   private func select(_ snowfall: Snowfall) {
@@ -717,8 +732,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // A custom menu view can survive multiple tracking sessions. Restore its
     // controls immediately, even when AppKit does not request a menu update.
     if statusItem != nil { updateWeatherControls(); updateLiveWeatherMenu() }
-    refreshCustomMenu()
     let scene = self.scene
+    refreshCustomMenu(scene: scene)
     for snow in screens {
       snow.setScene(scene)
       snow.setIntensity(effectiveIntensity)
@@ -726,11 +741,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     updateStatusIcon()
     prepareReflectionsIfNeeded()
-    statusItem?.button?.image = EffectArtwork.statusImage(for: statusEffect)
-    statusItem?.button?.setAccessibilityLabel("Atmos — \(scene.summary)")
-    statusItem?.button?.toolTip =
-      Preferences.liveWeather
-      ? "Atmos · Live Weather On · \(weather.status)" : "Atmos · Manual · \(scene.summary)"
   }
 
   @objc private func chooseWeatherSource(_ sender: NSMenuItem) {
@@ -745,6 +755,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc private func checkForUpdates() { updater.check() }
+  @objc private func chooseWeatherUnits(_ sender: NSMenuItem) {
+    guard let raw = sender.representedObject as? String, let units = WeatherUnits(rawValue: raw) else { return }
+    Preferences.weatherUnits = units
+    updateWeatherControls(); updateLiveWeatherMenu(); refreshCustomMenu(); updateStatusIcon()
+  }
   @objc private func toggleAutomaticUpdates() {
     Preferences.automaticUpdates.toggle()
     updateActivity()
@@ -767,7 +782,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func refreshPermissions() {
-    let granted = ScreenRecordingAccess.shared.isGranted
+    let granted = ScreenshotAccess.shared.isGranted
     permissionRequestItem.isHidden = granted
     let active = screens.contains { $0.isCapturingReflections }
     let stopped = screens.contains { $0.reflectionsStoppedByUser }
@@ -777,9 +792,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       status: weather.locationAuthorization, enabled: weather.enabled, locating: weather.isLocating,
       paused: weather.isSuspended)
     let login = SMAppService.mainApp.status
-    if ScreenRecordingAccess.shared.state == .checking {
-      screenPermissionItem.title = "Screen Recording · Checking…"
-    } else { updatePermission(screenPermissionItem, title: "Screen Recording", state: screen) }
+    if ScreenshotAccess.shared.state == .checking {
+      screenPermissionItem.title = "Screenshot Access · Checking…"
+    } else { updatePermission(screenPermissionItem, title: "Screenshot Access", state: screen) }
     updatePermission(locationPermissionItem, title: "Location Services", state: location)
     updatePermission(
       loginPermissionItem, title: "Open at Login",
@@ -799,12 +814,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc private func openScreenRecordingSettings() {
-    ScreenRecordingAccess.shared.returningFromSettings = true
+    ScreenshotAccess.shared.returningFromSettings = true
     NSWorkspace.shared.open(
       URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
   }
 
-  @objc private func recheckScreenRecording() { ScreenRecordingAccess.shared.recheck() }
+  @objc private func recheckScreenRecording() { ScreenshotAccess.shared.recheck() }
 
   @objc private func restartAtmos() {
     let helper = Process()
@@ -819,7 +834,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   @objc private func toggleFogBloom() {
     Preferences.fogBloom.toggle()
-    if Preferences.fogBloom && !ScreenRecordingAccess.shared.isGranted {
+    if Preferences.fogBloom && !ScreenshotAccess.shared.isGranted {
       requestSetupPermission(.screen)
     }
     screens.forEach { $0.setFogBloom(Preferences.fogBloom) }
@@ -846,13 +861,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func prepareReflectionsIfNeeded() {
-    // Screen Recording grants belong to the bundle identity, rather than migrated preferences.
+    // Screenshot Access grants belong to the bundle identity, rather than migrated preferences.
     let identity = Bundle.main.bundleIdentifier ?? "dev.grobb.Atmos"
     if Preferences.reflectionConsentIdentity != identity {
       Preferences.reflectionConsentVersion = 0
       Preferences.reflectionConsentIdentity = identity
     }
-    guard !setupPending, ScreenRecordingAccess.shared.isGranted,
+    guard !setupPending, ScreenshotAccess.shared.isGranted,
       statusItem != nil, effect.hasWater, screens.contains(where: { !$0.covered }),
       Preferences.reflectionConsentVersion < 2
     else { return }
@@ -865,13 +880,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   @objc private func allowReflections() {
     recordReflectionChoice(true)
     NSApp.activate(ignoringOtherApps: true)
-    if !ScreenRecordingAccess.shared.isGranted && !CGRequestScreenCaptureAccess(),
+    if !ScreenshotAccess.shared.isGranted && !CGRequestScreenCaptureAccess(),
       let url = URL(
         string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
     {
-      ScreenRecordingAccess.shared.returningFromSettings = true
+      ScreenshotAccess.shared.returningFromSettings = true
       NSWorkspace.shared.open(url)
-    } else { ScreenRecordingAccess.shared.recheck() }
+    } else { ScreenshotAccess.shared.recheck() }
     screens.forEach { $0.setReflections(true) }
   }
 
@@ -883,19 +898,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   @objc private func selectSnapshotReflections() {
     Preferences.liveReflections = false
     recordReflectionChoice(true)
-    if !ScreenRecordingAccess.shared.isGranted { allowReflections() }
+    if !ScreenshotAccess.shared.isGranted { allowReflections() }
     screens.forEach { $0.setReflections(true) }
   }
 
   @objc private func selectLiveReflections() {
     Preferences.liveReflections = true
     recordReflectionChoice(true)
-    if !ScreenRecordingAccess.shared.isGranted { allowReflections() }
+    if !ScreenshotAccess.shared.isGranted { allowReflections() }
     screens.forEach { $0.setReflections(true) }
   }
 
   private func updateStatusIcon() {
-    statusItem.button?.appearsDisabled = effectiveIntensity == .off
+    guard let statusItem, let button = statusItem.button else { return }
+    let available = updater.updateAvailable
+    statusItem.length = available ? NSStatusBar.system.thickness + 12 : NSStatusItem.squareLength
+    button.image = EffectArtwork.statusImage(for: statusEffect)
+    button.appearsDisabled = effectiveIntensity == .off
+    updateBadge.frame = CGRect(x: button.bounds.maxX - 6, y: (button.bounds.height - 5) / 2, width: 5, height: 5)
+    updateBadge.isHidden = !available
+    let notice = available ? " · Update available" : ""
+    button.setAccessibilityLabel("Atmos — \(scene.summary)" + notice)
+    let weatherStatus = weather.current.map {
+      "\($0.condition) · \(Preferences.weatherUnits.temperature($0.temperature)) · \(Preferences.weatherUnits.wind($0.windSpeed))"
+    } ?? weather.status
+    button.toolTip = (Preferences.liveWeather
+      ? "Atmos · Live Weather On · \(weatherStatus)" : "Atmos · Manual · \(scene.summary)") + notice
   }
 
   // MARK: - System
@@ -905,7 +933,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let workspace = NSWorkspace.shared.notificationCenter
     let distributed = DistributedNotificationCenter.default()
     observe(.default, NSApplication.didBecomeActiveNotification) { _ in
-      let access = ScreenRecordingAccess.shared
+      let access = ScreenshotAccess.shared
       if access.returningFromSettings { access.returningFromSettings = false; access.recheck() }
     }
 
@@ -986,6 +1014,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   func applicationWillTerminate(_ notification: Notification) {
     weather.stop()
+    updater.stop()
     liveSceneTimer?.invalidate()
     screens.forEach { $0.close() }
   }

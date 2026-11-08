@@ -337,7 +337,7 @@ final class LiveWeather: NSObject, CLLocationManagerDelegate {
         updatedAt = Date()
         recovery.resetRetries()
         status =
-          "\(weather.condition) · \(Int(weather.temperature.rounded()))°C · \(Int(weather.windSpeed.rounded())) km/h"
+          "\(weather.condition) · \(Preferences.weatherUnits.temperature(weather.temperature)) · \(Preferences.weatherUnits.wind(weather.windSpeed))"
         changed()
         scheduleExpiry()
         scheduleAlertBoundary()

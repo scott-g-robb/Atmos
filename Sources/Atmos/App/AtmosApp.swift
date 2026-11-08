@@ -4,6 +4,11 @@ import AppKit
 enum AtmosApp {
   static func main() {
     let app = NSApplication.shared
+    if CommandLine.arguments.contains("--profile-desktop-capture") {
+      app.setActivationPolicy(.prohibited)
+      Task { @MainActor in await CaptureDiagnostics.run(); exit(0) }
+      app.run(); return
+    }
     if CommandLine.arguments.contains("--verify-native-weatherkit") {
       app.setActivationPolicy(.prohibited)
       Task { @MainActor in

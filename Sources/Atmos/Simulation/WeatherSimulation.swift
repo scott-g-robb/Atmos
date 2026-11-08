@@ -6,11 +6,7 @@ import simd
 // The C ABI is also the Metal vertex layout; Rust steps this storage in place.
 typealias WeatherParticle = SHParticle
 
-struct WaterRipple {
-  var point: SIMD2<Float>
-  var age: Float
-  var strength: Float
-}
+typealias WaterRipple = SHWaterRipple
 
 final class WaterSurface {
   let id: CGWindowID
@@ -42,6 +38,7 @@ final class WaterSurface {
     var continuous=false
   }
   private var releaseStorage: [Release] = []
+  private var cursorReleases: [SHWaterRelease] = []
   private var releaseHead = 0
   var releases: ArraySlice<Release> { releaseStorage[releaseHead...] }
   var detached: Float { releases.reduce(0) { $0 + $1.amount } }
@@ -103,33 +100,74 @@ final class WaterSurface {
   }
 
   private func impart(_ velocity: SIMD2<Float>, interval: Float) {
-    let dt = max(1 / 120, min(0.1, interval))
-    let delta = velocity - supportVelocity
-    let acceleration = delta / dt
-    if simd_length(delta)>350 && volume>0.1 {foam = max(foam,min(1,(simd_length(delta)-300)/600))}
-    foamCenter=origin.x+width*0.5;foamRadius=width
-    // Loss of contact follows the normal force. Water leaves with its existing world
-    // momentum; slowing an upward window and accelerating it downward use the same rule.
-    let separating = max(0, -acceleration.y - 950)
-    if separating > 0 && volume > 0.001 {
-      cachedVolume = nil
-      // Detach the local fluid column, never a fixed number of evenly spaced drops.
-      // Neighbour pressure/cohesion subsequently keeps this fluid in sheets and ligaments.
-      for j in depths.indices {
-        let adhesion = 180 / max(0.3, depths[j])
-        let fraction = 1 - exp(-max(0, separating - adhesion) / 950 * dt * 8)
-        let mass = depths[j] * fraction
-        guard mass > 0.0001 else { continue }
-        let x = Float(j) / Float(depths.count - 1) * width
-        let height = max(0, depths[j] - bed[j] + waves[j])
-        let velocity = supportVelocity + SIMD2(horizontal[j], speeds[j])
-        depths[j] -= mass
-        liquidImpulse[j] = velocity
-        appendRelease(Release(amount: mass, point: origin + SIMD2(x, height * 0.5), velocity: velocity))
+    var input = physicsContext()
+    let count = withMutablePhysics { b in
+      sh_water_impart(b.depths,b.horizontal,b.speeds,b.bed,b.waves,b.impulses,b.count,
+        &input,velocity.x,velocity.y,interval,b.releases,b.capacity)
+    }
+    cachedVolume=nil;foam=input.foam;foamCenter=input.foamCenter;foamRadius=input.foamRadius
+    supportVelocity=velocity
+    enqueuePhysicsReleases(count)
+  }
+
+  private struct PhysicsBuffers {
+    var depths:UnsafeMutablePointer<Float>?, horizontal:UnsafeMutablePointer<Float>?
+    var speeds:UnsafePointer<Float>?, bed:UnsafePointer<Float>?, waves:UnsafePointer<Float>?
+    var impulses:UnsafeMutablePointer<SIMD2<Float>>?, releases:UnsafeMutablePointer<SHWaterRelease>?
+    var count:Int, capacity:Int
+  }
+  private func physicsContext() -> SHWaterCursor {
+    SHWaterCursor(originX:origin.x,originY:origin.y,width:width,spacing:Self.spacing,
+      supportVX:supportVelocity.x,supportVY:supportVelocity.y,cursorX:0,cursorY:0,
+      previousX:0,previousY:0,velocityX:0,velocityY:0,splashScale:1,
+      foam:foam,foamCenter:foamCenter,foamRadius:foamRadius)
+  }
+  private func withMutablePhysics<T>(_ body:(PhysicsBuffers)->T) -> T {
+    let capacity=min(2048,max(256,depths.count*4+16))
+    if cursorReleases.count != capacity {cursorReleases=Array(repeating:SHWaterRelease(),count:capacity)}
+    return depths.withUnsafeMutableBufferPointer { d in
+      horizontal.withUnsafeMutableBufferPointer { h in
+        speeds.withUnsafeBufferPointer { v in
+          bed.withUnsafeBufferPointer { b in
+            waves.withUnsafeBufferPointer { w in
+              liquidImpulse.withUnsafeMutableBufferPointer { k in
+                cursorReleases.withUnsafeMutableBufferPointer { out in
+                  body(PhysicsBuffers(depths:d.baseAddress,horizontal:h.baseAddress,speeds:v.baseAddress,
+                    bed:b.baseAddress,waves:w.baseAddress,impulses:k.baseAddress,releases:out.baseAddress,
+                    count:d.count,capacity:out.count))
+                }
+              }
+            }
+          }
+        }
       }
     }
-    for i in horizontal.indices { horizontal[i] = max(-1200, min(1200, horizontal[i] - delta.x)) }
-    supportVelocity = velocity
+  }
+  private func enqueuePhysicsReleases(_ count:Int) {
+    for release in cursorReleases.prefix(count) {
+      appendRelease(Release(amount:release.amount,point:release.point,velocity:release.velocity,
+        continuous:release.continuous != 0))
+    }
+  }
+  /// The view is borrowed for this call only; Rust never stores Swift buffer pointers.
+  func withPhysicsField<T>(_ body:(inout SHWaterField)->T) -> T {
+    let origin=origin,support=supportVelocity,width=width,id=id
+    return heights.withUnsafeBufferPointer { h in
+      depths.withUnsafeBufferPointer { d in
+        horizontal.withUnsafeBufferPointer { u in
+          speeds.withUnsafeBufferPointer { v in
+            liquidImpulse.withUnsafeBufferPointer { k in
+              blockers.withUnsafeBufferPointer { b in
+                var view=SHWaterField(heights:h.baseAddress,depths:d.baseAddress,horizontal:u.baseAddress,
+                  speeds:v.baseAddress,impulses:k.baseAddress,blockers:b.baseAddress,count:h.count,
+                  blockerCount:b.count,origin:origin,supportVelocity:support,width:width,spacing:Self.spacing,id:id)
+                return body(&view)
+              }
+            }
+          }
+        }
+      }
+    }
   }
 
   private func appendRelease(_ release: Release) {
@@ -183,57 +221,26 @@ final class WaterSurface {
 
   func hit(x: Float, amount: Float, impulse: Float = 1) {
     cachedVolume = nil
-    let index = min(depths.count - 2, max(1, Int((x - origin.x) / width * Float(depths.count - 1))))
-    for j in max(0, index - 2)...min(depths.count - 1, index + 2) {
-      let weight: Float = j == index ? 0.4 : abs(j - index) == 1 ? 0.22 : 0.08
-      depths[j] = id == 0 ? min(limit, depths[j] + amount * weight) : depths[j] + amount * weight
-      speeds[j] = max(-8, min(8, speeds[j] + impulse * weight))
+    let ox=origin.x,width=width,limit=limit,bounded:UInt32=id == 0 ? 1:0
+    depths.withUnsafeMutableBufferPointer { d in
+      speeds.withUnsafeMutableBufferPointer { v in
+        sh_water_hit(d.baseAddress,v.baseAddress,d.count,ox,width,x,amount,impulse,limit,bounded)
+      }
     }
   }
 
   /// Match the rendered cubic waterline so floating material never snaps between columns.
-  func depth(at x: Float) -> Float {
-    let column = max(
-      0, min(Float(heights.count - 1) - 0.0001, (x - origin.x) / width * Float(heights.count - 1)))
-    let i = Int(column)
-    let t = column - Float(i)
-    let a = heights[max(0, i - 1)]
-    let b = heights[i]
-    let c = heights[i + 1]
-    let d = heights[min(heights.count - 1, i + 2)]
-    let t2 = t * t
-    let t3 = t * t * t
-    let value =
-      0.5
-      * ((2 * b) + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3)
-    var result = max(max(0, min(b, c) - 0.2), min(max(b, c) + 0.2, value))
-    if origin.y > 0.5 {
-      let edge = min(x - origin.x, origin.x + width - x)
-      let t = max(0, min(1, edge / 10))
-      result *= t * t * (3 - 2 * t)
-    }
-    return result
-  }
+  func depth(at x: Float) -> Float { withPhysicsField {sh_water_depth(&$0,x)} }
 
-  /// Surface flow for buoyant material; support inertia and local slopes both contribute.
-  func current(at x: Float) -> Float {
-    let i = min(depths.count - 2, max(1, Int((x - origin.x) / Self.spacing)))
-    let slope = (heights[i + 1] - heights[i - 1]) / (2 * Self.spacing)
-    return max(-65, min(65, horizontal[i] * 0.12 - slope * 18))
-  }
+  func current(at x: Float) -> Float { withPhysicsField {sh_sample_water(&$0,x).current} }
 
   /// Extract real volume for ballistic droplets. Never invent splash water.
   func extract(x: Float, radius: Float, fraction: Float) -> Float {
-    cachedVolume = nil
-    var amount: Float = 0
-    guard let columns = columns(near: x, radius: radius) else { return 0 }
-    let fraction = min(1, max(0, fraction))
-    for i in columns where abs(origin.x + Float(i)/Float(depths.count-1)*width - x) <= radius {
-      let taken = depths[i] * fraction
-      depths[i] -= taken
-      amount += taken
+    cachedVolume=nil
+    let ox=origin.x,width=width
+    return depths.withUnsafeMutableBufferPointer {
+      sh_water_extract($0.baseAddress,$0.count,ox,width,x,radius,fraction)
     }
-    return amount
   }
 
   /// A solid circular collider excludes real fluid volume. The displaced volume
@@ -241,88 +248,46 @@ final class WaterSurface {
   @discardableResult
   func collide(cursor: SIMD2<Float>, previous: SIMD2<Float>, velocity: SIMD2<Float>, dt: Float) -> Bool {
     guard volume > 0.0001 else { return false }
-    let stroke = cursor - previous
-    let distance = simd_length(stroke)
-    let steps = min(100, max(1, Int(ceil(distance / 5))))
-    var touched = false
-    for step in 1...steps {
-      let centre = previous + stroke * (Float(step) / Float(steps))
-      let lower=max(0,Int(floor((centre.x-11-origin.x)/width*Float(depths.count-1))))
-      let upper=min(depths.count-1,Int(ceil((centre.x+11-origin.x)/width*Float(depths.count-1))))
-      guard lower<=upper else {continue}
-      for i in lower...upper {
-        let x = origin.x + Float(i) / Float(depths.count - 1) * width
-        let dx = x - centre.x, radius: Float = 11
-        guard abs(dx) < radius, accepts(x: x), depths[i] > 0.001 else { continue }
-        let half = sqrt(max(0, radius * radius - dx * dx))
-        let bottom = max(0, centre.y - half - origin.y)
-        guard centre.y + half > origin.y, depths[i] > bottom else { continue }
-        touched = true; cachedVolume = nil
-        let cap = max(bottom,centre.y + half - origin.y)
-        let above = max(0,depths[i]-cap)
-        if above > 0.001 {
-          // A height field cannot represent an overhang. Transfer just this upper
-          // layer to the free-liquid solver so it can flow OVER a submerged collider.
-          appendRelease(Release(amount:above,point:SIMD2(x,origin.y+cap+above*0.5),
-            velocity:supportVelocity+SIMD2(horizontal[i],speeds[i])))
-        }
-        let amount = max(0,min(depths[i],cap)-bottom)
-        let point = SIMD2(x, origin.y + max(bottom, depths[i]))
-        var normal = point - centre
-        normal /= max(0.001, simd_length(normal))
-        let closing = max(0, simd_dot(velocity, normal))
-        var impulse = normal * closing
-        // A downward impact compresses water against the supporting ledge. The
-        // displaced volume exits upward around the cursor rather than losing all
-        // entry energy because the top-surface normal faces against the stroke.
-        let down = max(0,-velocity.y)
-        let confinement = min(1,amount/max(1,half))
-        let rebound = down * sqrt(confinement) * 0.65
-        impulse.y = max(impulse.y,rebound)
-        impulse.x += (dx < 0 ? -1 : 1) * rebound * 0.25
-        if simd_length(velocity)>350 && centre.y<point.y && amount>0.15 && max(closing,rebound)>180 {foam = max(foam,min(1,(max(closing,rebound)-150)/450));foamCenter=x;foamRadius=35}
-        depths[i] = bottom
-        // Available kinetic energy versus the gravitational binding head.
-        if impulse.y > sqrt(2 * 950 * max(0.5, depths[i] + amount)) {
-          appendRelease(Release(amount: amount, point: centre + normal * radius,
-            velocity: supportVelocity + SIMD2(horizontal[i], speeds[i]) + impulse))
-        } else {
-          let side: Float = dx == 0 ? (velocity.x < 0 ? -1 : 1) : (dx < 0 ? -1 : 1)
-          let destinationX = centre.x + side * (radius + Self.spacing)
-          let j = max(0, min(depths.count - 1, Int(((destinationX-origin.x)/width*Float(depths.count-1)).rounded())))
-          depths[j] += amount
-          horizontal[j] += impulse.x * amount / max(0.01, depths[j])
-          speeds[j] += impulse.y * amount / max(0.01, depths[j])
-        }
-        for k in max(0,i-3)...min(depths.count-1,i+3) {
-          liquidImpulse[k] += impulse * (1-Float(abs(k-i))/4) / Float(steps)
+    let capacity=min(2048,max(256,depths.count*4+16))
+    if cursorReleases.count != capacity {cursorReleases=Array(repeating:SHWaterRelease(),count:capacity)}
+    var input=SHWaterCursor(originX:origin.x,originY:origin.y,width:width,spacing:Self.spacing,
+      supportVX:supportVelocity.x,supportVY:supportVelocity.y,cursorX:cursor.x,cursorY:cursor.y,
+      previousX:previous.x,previousY:previous.y,velocityX:velocity.x,velocityY:velocity.y,
+      splashScale:id != 0 && !isDock ? 0.5:1,foam:foam,foamCenter:foamCenter,foamRadius:foamRadius)
+    let result=depths.withUnsafeMutableBufferPointer { d in
+      horizontal.withUnsafeMutableBufferPointer { h in
+        speeds.withUnsafeMutableBufferPointer { v in
+          liquidImpulse.withUnsafeMutableBufferPointer { kicks in
+            blockers.withUnsafeBufferPointer { b in
+              cursorReleases.withUnsafeMutableBufferPointer { out in
+                sh_collide_water(d.baseAddress,h.baseAddress,v.baseAddress,kicks.baseAddress,d.count,
+                  b.baseAddress,b.count,&input,out.baseAddress,out.count)
+              }
+            }
+          }
         }
       }
     }
-    return touched
+    if result.touched != 0 {cachedVolume=nil}
+    foam=result.foam;foamCenter=result.foamCenter;foamRadius=result.foamRadius
+    for release in cursorReleases.prefix(result.count) {
+      appendRelease(Release(amount:release.amount,point:release.point,velocity:release.velocity,continuous:release.continuous != 0))
+    }
+    return result.touched != 0
   }
 
   func kick(x:Float,radius:Float,velocity:SIMD2<Float>,sustained:Bool=false) {
     if sustained {sustainedPressure=true}
     if simd_length(velocity)>350 {foam=max(foam,min(1,simd_length(velocity)/700));foamCenter=x;foamRadius=radius}
-    guard let columns = columns(near: x, radius: max(1, radius)) else { return }
-    for i in columns {
-      let px=origin.x+Float(i)/Float(depths.count-1)*width
-      let weight=max(0,1-abs(px-x)/max(1,radius))
-      liquidImpulse[i]+=velocity*weight
+    let ox=origin.x,width=width
+    liquidImpulse.withUnsafeMutableBufferPointer {
+      sh_water_kick($0.baseAddress,$0.count,ox,width,x,radius,velocity.x,velocity.y)
     }
   }
 
-  private func columns(near x: Float, radius: Float) -> ClosedRange<Int>? {
-    let scale = Float(depths.count - 1) / width
-    let lower = max(0, Int(floor((x - radius - origin.x) * scale)))
-    let upper = min(depths.count - 1, Int(ceil((x + radius - origin.x) * scale)))
-    return lower <= upper ? lower...upper : nil
-  }
-
   func velocity(at x: Float) -> SIMD2<Float> {
-    let i = max(0,min(depths.count-1,Int((x-origin.x)/width*Float(depths.count-1))))
-    return supportVelocity + SIMD2(horizontal[i],speeds[i]) + liquidImpulse[i]
+    let result=withPhysicsField {sh_sample_water(&$0,x)}
+    return SIMD2(result.vx,result.vy)
   }
 
   func sweep(x: Float, velocity: Float, dt: Float) {
@@ -332,12 +297,12 @@ final class WaterSurface {
 
   func releaseAll() {
     cachedVolume = nil
-    for i in depths.indices where depths[i] > 0.0001 {
-      let x=origin.x+Float(i)/Float(depths.count-1)*width
-      appendRelease(Release(amount: depths[i], point: SIMD2(x,origin.y+max(0,depths[i]-bed[i])*0.5),
-        velocity: velocity(at:x)))
-      depths[i]=0
+    var input=physicsContext()
+    let count=withMutablePhysics {b in
+      sh_water_release_all(b.depths,b.horizontal,b.speeds,b.bed,b.impulses,b.count,
+        &input,b.releases,b.capacity)
     }
+    enqueuePhysicsReleases(count)
   }
 
   func step(
@@ -347,27 +312,13 @@ final class WaterSurface {
     cachedVolume = nil
     let count = depths.count
     foam *= exp(-dt * 6)
-    let pressureDecay = exp(-dt * 9)
-    var strongestPressure:Float=0
-    for i in liquidImpulse.indices {
-      liquidImpulse[i] *= pressureDecay
-      strongestPressure=max(strongestPressure,liquidImpulse[i].y)
-      let up=liquidImpulse[i].y,head=depths[i]
-      if sustainedPressure && head>0.03 && up>max(120,sqrt(2*950*head)) {
-        // A pressure impulse persists in the fluid field and feeds a continuous
-        // jet until its energy dissipates, instead of one isolated row of beads.
-        let energy=max(0,1-2*950*head/(up*up))
-        let fraction=min(0.2,energy*dt*6),mass=head*fraction
-        if mass>0.001 {
-          let x=origin.x+Float(i)/Float(depths.count-1)*width
-          appendRelease(Release(amount:mass,point:SIMD2(x,origin.y+max(0,head-bed[i])),
-            velocity:supportVelocity+SIMD2(horizontal[i],speeds[i])+liquidImpulse[i],continuous:true))
-          depths[i]-=mass
-          liquidImpulse[i] *= sqrt(max(0,1-fraction))
-        }
-      }
+    var input=physicsContext(),sustained:UInt32=sustainedPressure ? 1:0
+    let released=withMutablePhysics {b in
+      sh_water_pressure(b.depths,b.horizontal,b.speeds,b.bed,b.impulses,b.count,
+        &input,dt,&sustained,b.releases,b.capacity)
     }
-    if strongestPressure<120 {sustainedPressure=false}
+    sustainedPressure=sustained != 0
+    enqueuePhysicsReleases(released)
     if id != 0 {
       let spill = depths.withUnsafeMutableBufferPointer { d in
         horizontal.withUnsafeMutableBufferPointer { v in
@@ -880,8 +831,8 @@ final class WeatherSimulation {
     storage.withUnsafeMutableBufferPointer { p in
       sh_couple_liquid(p.baseAddress, particleCount, dt, cursor.x,cursor.y,velocity.x,velocity.y)
     }
-    for i in ripples.indices { ripples[i].age += dt }
-    ripples.removeAll { $0.age > 1.5 }
+    let rippleCount=replicateRippleStep(dt:dt)
+    if rippleCount<ripples.count {ripples.removeLast(ripples.count-rippleCount)}
     // Light secondary layers are emitted in the same bounded particle storage.
     if !retiring && !clearing {
       secondaryEmitted +=
@@ -1159,21 +1110,13 @@ final class WeatherSimulation {
   }
 
   private func appendLiquid(_ release: WaterSurface.Release, maximum: Int = 128) {
-    guard release.amount > 0.0001, particleCount < Self.capacity else { return }
-    // Pixel-scale fluid parcels represent the same conserved volume. Dense small
-    // samples reconstruct thin ligaments instead of rendering one large glass ball.
-    let count=min(maximum,max(1,Int(ceil(release.amount/0.08))),Self.capacity-particleCount)
-    let mass=release.amount/Float(count)
-    let diameter=max(0.75,min(1.8,sqrt(mass)*2.3))
-    let phase=unit()*2*Float.pi
-    for k in 0..<count {
-      let angle=phase+Float(k)*2.3999632
-      let radius=sqrt((Float(k)+0.5)/Float(count))*max(0.6,sqrt(Float(count))*0.42)
-      let point=release.point+SIMD2(cos(angle),sin(angle))*radius
-      append(WeatherParticle(rect:SIMD4(point.x,point.y,diameter,diameter),
-        motion:SIMD4(release.velocity.x,release.velocity.y,release.continuous ? -max(0.001,phase/(2*Float.pi)) : phase/(2*Float.pi),9),
-        color:SIMD4(point.x,point.y,diameter*0.5,0.9),
-        life:SIMD4(0,14,mass,0)))
+    guard release.amount>0.0001,particleCount<Self.capacity else {return}
+    if storage.isEmpty {storage=[WeatherParticle](repeating:WeatherParticle(),count:Self.capacity)}
+    var input=SHWaterRelease(point:release.point,velocity:release.velocity,amount:release.amount,
+      continuous:release.continuous ? 1:0)
+    let phase=unit()*2*Float.pi,count=particleCount
+    particleCount=storage.withUnsafeMutableBufferPointer {
+      sh_emit_liquid($0.baseAddress,count,$0.count,&input,maximum,phase)
     }
   }
 
@@ -1187,17 +1130,17 @@ final class WeatherSimulation {
   }
 
   private func addRipple(at point: SIMD2<Float>, strength: Float) {
-    if let i=ripples.indices.first(where: {ripples[$0].age<0.1 && simd_distance(ripples[$0].point,point)<24}) {
-      let old=ripples[i].strength,total=old+strength
-      ripples[i].point=(ripples[i].point*old+point*strength)/max(0.001,total)
-      ripples[i].strength=min(1.7,sqrt(old*old+strength*strength))
-      return // Preserve age: repeated rain cannot restart a white point every frame.
+    // Append one initialized scratch slot so the C kernel never writes into
+    // uninitialized Swift Array capacity. The logical ripple limit remains 32.
+    let previousCount=ripples.count
+    if previousCount<32 {ripples.append(WaterRipple())}
+    let count=ripples.withUnsafeMutableBufferPointer {
+      sh_add_ripple($0.baseAddress,previousCount,$0.count,point.x,point.y,strength)
     }
-    if ripples.count==32 {
-      guard let i=ripples.indices.min(by:{ripples[$0].strength*exp(-ripples[$0].age*4)<ripples[$1].strength*exp(-ripples[$1].age*4)}),ripples[i].age>0.2 else {return}
-      ripples.remove(at:i)
-    }
-    ripples.append(WaterRipple(point:point,age:0,strength:min(1.7,strength)))
+    if count<ripples.count {ripples.removeLast(ripples.count-count)}
+  }
+  private func replicateRippleStep(dt:Float)->Int {
+    ripples.withUnsafeMutableBufferPointer {sh_step_ripples($0.baseAddress,$0.count,dt)}
   }
 
   /// Transfer a bounded amount of existing water into an impact crown. Energy sets
@@ -1206,19 +1149,16 @@ final class WeatherSimulation {
     let speed=abs(velocity.y),remaining=puddleSplashSamples[surface.id] ?? (reducedMotion ? 4:12)
     guard speed>250,surface.depth(at:x)>0.12,remaining>=2,impactSplashBudget>=2,particleCount<Self.capacity-64 else {return}
     let samples=min(6,remaining/2,impactSplashBudget/2)
-    let radius=min(14,max(4,speed*0.007))
-    let volume=surface.extract(x:x,radius:radius,fraction:min(surface.id==0 ? 0.08:0.14,amount*speed/18000))
+    let waterVelocity=surface.velocity(at:x)
+    let params=sh_splash_parameters(velocity.x,velocity.y,waterVelocity.x,waterVelocity.y,amount,surface.id==0 ? 1:0)
+    let volume=surface.extract(x:x,radius:params.radius,fraction:params.fraction)
     guard volume>0.0001 else {return}
     puddleSplashSamples[surface.id]=remaining-samples*2;impactSplashBudget-=samples*2
-    let rise=min(500,speed*0.23),waterVelocity=surface.velocity(at:x)
-    surface.kick(x:x,radius:radius,velocity:SIMD2(0,rise*0.3*min(1,amount/4)))
-    // Mostly vertical rain creates mostly vertical ejecta. The incoming drop carries
-    // wind momentum; the impact's radial spread is only a small crown component.
-    let carriedX=velocity.x*0.8+waterVelocity.x*0.2
+    surface.kick(x:x,radius:params.radius,velocity:SIMD2(0,params.kick))
     for side:Float in [-1,1] {
       appendLiquid(WaterSurface.Release(amount:volume*0.5,
-        point:SIMD2(x+side*radius*0.25,surface.origin.y+surface.depth(at:x)+0.6),
-        velocity:SIMD2(carriedX+side*rise*0.08,waterVelocity.y*0.2+rise)),maximum:samples)
+        point:SIMD2(x+side*params.radius*0.25,surface.origin.y+surface.depth(at:x)+0.6),
+        velocity:SIMD2(params.carriedX+side*params.rise*0.08,params.carriedY)),maximum:samples)
     }
   }
 
@@ -1244,18 +1184,11 @@ final class WeatherSimulation {
       let first=particleCount
       appendLiquid(WaterSurface.Release(amount:mass,point:SIMD2(px,line+0.8),
         velocity:v+SIMD2(r*rise*0.32,rise*sqrt(max(0.12,weight)))),maximum:samples)
-      let extent=max(0.6,sqrt(Float(particleCount-first))*0.42)
-      for i in first..<particleCount {
-        // Sample the actual removed layer, rather than collapsing its full depth
-        // into a row of identical droplets. Pressure varies continuously over the
-        // layer and across the impact, allowing curtains and ligaments to stretch.
-        let z=max(0,min(1,0.5+(storage[i].rect.y-(line+0.8))/(2*extent)))
-        storage[i].rect.y=line-mass+z*mass
-        let localR=(storage[i].rect.x-x)/radius
-        storage[i].motion.x=v.x+localR*rise*0.20
-        storage[i].motion.y=v.y+rise*sqrt(max(0.12,1-localR*localR))*sqrt(0.35+0.65*z)
-        storage[i].life.w=0.7*weight
+      let count=particleCount-first
+      storage.withUnsafeMutableBufferPointer {p in
+        sh_lightning_liquid(p.baseAddress?.advanced(by:first),count,x,radius,line,mass,v.x,v.y,rise,weight)
       }
+
     }
     surface.kick(x:x,radius:radius,velocity:SIMD2(0,rise*0.9),sustained:true)
   }

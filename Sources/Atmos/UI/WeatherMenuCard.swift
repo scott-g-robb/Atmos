@@ -104,7 +104,8 @@ final class WeatherMenuCard: NSView {
     }
     alerts.isHidden = alerts.arrangedSubviews.isEmpty
     if let reading {
-      temperature.stringValue = "\(Int(reading.temperature.rounded()))°"
+      let units = Preferences.weatherUnits
+      temperature.stringValue = units.temperature(reading.temperature)
       condition.stringValue =
         reading.condition.prefix(1).uppercased() + reading.condition.dropFirst()
       icon.image = NSImage(
@@ -112,10 +113,10 @@ final class WeatherMenuCard: NSView {
       let direction = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][
         Int((reading.windDirection / 45).rounded()) % 8]
       let feels =
-        reading.apparentTemperature.map { "Feels like \(Int($0.rounded()))°" }
+        reading.apparentTemperature.map { "Feels like \(units.temperature($0))" }
         ?? "\(reading.isDay == 1 ? "Daytime" : "Nighttime")"
       metrics.stringValue =
-        "\(feels)     Wind \(Int(reading.windSpeed.rounded())) km/h \(direction)\nCloud \(Int((reading.cloudCover ?? 0).rounded()))%     Rain \(String(format: "%.1f", reading.precipitationRate)) mm/h"
+        "\(feels)     Wind \(units.wind(reading.windSpeed)) \(direction)\nCloud \(Int((reading.cloudCover ?? 0).rounded()))%     Rain \(units.rainfall(reading.precipitationRate))"
         + (reading.humidity.map { "     Humidity \(Int($0.rounded()))%" } ?? "")
       layers.stringValue = WeatherScene(weather: reading).summary
       let time = DateFormatter.localizedString(

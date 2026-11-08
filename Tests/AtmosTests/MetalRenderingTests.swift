@@ -17,7 +17,9 @@ final class MetalRenderingTests: XCTestCase {
         blockers: [], cornerRadius: 18, cornerExponent: 2.5, isDock: false)
       renderer.simulation.updateWindows([surface])
       renderer.simulation.wind = 36
-      for _ in 0..<900 { renderer.simulation.step(dt: 1.0 / 60, cursor: SIMD2(-100, -100)) }
+      // A flock can intentionally pass without landing. Sample its entrance,
+      // rather than the later natural lull, when checking bird artwork visibility.
+      for _ in 0..<(effect == .birds ? 180 : 900) { renderer.simulation.step(dt: 1.0 / 60, cursor: SIMD2(-100, -100)) }
       let target = try texture(device, width: 960, height: 600)
       try render(renderer, target: target, queue: queue)
       let pixels = bytes(target)

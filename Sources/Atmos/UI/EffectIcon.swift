@@ -52,3 +52,13 @@ struct EffectIcon: View {
     else { Image(systemName: effect.symbol) }
   }
 }
+
+/// A separate coloured view preserves the system's template rendering of the
+/// weather icon. Let clicks pass through to the status button underneath.
+final class UpdateBadgeView: NSView {
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+  override func draw(_ dirtyRect: NSRect) {
+    NSColor.systemOrange.setFill()
+    NSBezierPath(ovalIn: bounds.insetBy(dx: 0.25, dy: 0.25)).fill()
+  }
+}

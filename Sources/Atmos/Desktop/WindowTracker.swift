@@ -405,7 +405,7 @@ final class WindowTracker {
     fullScreenShare(in: Self.windowList(now: now))
   }
 
-  /// Does not depend on private Space metadata or Screen Recording permission.
+  /// Does not depend on private Space metadata or Screenshot Access permission.
   func geometryShowsFullScreen(now: CFTimeInterval) -> Bool {
     guard !missionControlShows(now: now) else { return false }
     let frames = Self.windowList(now: now).compactMap { entry -> CGRect? in
@@ -529,10 +529,10 @@ final class WindowTracker {
           let alpha = entry.alpha, alpha > 0.01, entry.onScreen != false,
           bounds.width > 1, bounds.height > 1, bounds.intersects(screen),
           let layer = entry.layer, layer >= 0, layer < maxLayer,
-          entry.owner != "Window Server", entry.owner != "CursorUIViewService"
+          entry.owner != "Window Server", entry.owner != "CursorUIViewService", entry.owner != "Atmos", leaving[id] == nil
         else { return nil }
         return ReflectionWindow(
-          id: id, frame: bounds.offsetBy(dx: -screen.minX, dy: -screen.minY), alpha: Float(alpha))
+          id: id, frame: bounds.offsetBy(dx: -screen.minX, dy: -screen.minY), alpha: Float(alpha), ownerPID: entry.pid, occludesOthers: layer == 0)
       }
     }
 
@@ -550,6 +550,7 @@ final class WindowTracker {
     fullScreenInView = fullScreenAppHidesDock(in: list)
     fullScreenShare = fullScreenShare(in: list)
     defer {
+      if exposing { reflectionWindows.removeAll(keepingCapacity:true) }
       alphas = fresh
       panelsShownAt = panels
       let nextCovers = exposing ? [] : windows

@@ -100,6 +100,24 @@
 			<key>fileRef</key>
 			<string>8201B16CFB1FBC1ADD9E5190</string>
 		</dict>
+		<key>83BF28DB830BCC9BCC2262D3</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXFileReference</string>
+			<key>lastKnownFileType</key>
+			<string>sourcecode.swift</string>
+			<key>path</key>
+			<string>Sources/Atmos/App/CaptureDiagnostics.swift</string>
+			<key>sourceTree</key>
+			<string>SOURCE_ROOT</string>
+		</dict>
+		<key>A0059E8E12BD4C8CD57093AC</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXBuildFile</string>
+			<key>fileRef</key>
+			<string>83BF28DB830BCC9BCC2262D3</string>
+		</dict>
 		<key>9BD827B6161F7FC2FC4D9D6E</key>
 		<dict>
 			<key>isa</key>
@@ -190,23 +208,23 @@
 			<key>fileRef</key>
 			<string>7945A014C2A4039589D6DC7C</string>
 		</dict>
-		<key>7334C057B9A1D69FF209A1DB</key>
+		<key>A47DBD91CF3040464596560C</key>
 		<dict>
 			<key>isa</key>
 			<string>PBXFileReference</string>
 			<key>lastKnownFileType</key>
 			<string>sourcecode.swift</string>
 			<key>path</key>
-			<string>Sources/Atmos/App/ScreenRecordingAccess.swift</string>
+			<string>Sources/Atmos/App/ScreenshotAccess.swift</string>
 			<key>sourceTree</key>
 			<string>SOURCE_ROOT</string>
 		</dict>
-		<key>9B6CCF134DBD6F6C076CC578</key>
+		<key>0FBD471D3CC2D9193E162641</key>
 		<dict>
 			<key>isa</key>
 			<string>PBXBuildFile</string>
 			<key>fileRef</key>
-			<string>7334C057B9A1D69FF209A1DB</string>
+			<string>A47DBD91CF3040464596560C</string>
 		</dict>
 		<key>B57E970301A61807376D91CE</key>
 		<dict>
@@ -748,6 +766,24 @@
 			<key>fileRef</key>
 			<string>DB30AB960580B21B9B1B6AAB</string>
 		</dict>
+		<key>48732FEADB060BF2FA80052D</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXFileReference</string>
+			<key>lastKnownFileType</key>
+			<string>sourcecode.swift</string>
+			<key>path</key>
+			<string>Sources/Atmos/Simulation/SnowPhysics.swift</string>
+			<key>sourceTree</key>
+			<string>SOURCE_ROOT</string>
+		</dict>
+		<key>B6829A2155910F607C8C5273</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXBuildFile</string>
+			<key>fileRef</key>
+			<string>48732FEADB060BF2FA80052D</string>
+		</dict>
 		<key>8C6C3FF6AA83283B6F4C59F5</key>
 		<dict>
 			<key>isa</key>
@@ -801,6 +837,24 @@
 			<string>PBXBuildFile</string>
 			<key>fileRef</key>
 			<string>853EF1E12EDA087143F5ABA5</string>
+		</dict>
+		<key>8C9CB9A57DAA137EBE7E28CA</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXFileReference</string>
+			<key>lastKnownFileType</key>
+			<string>sourcecode.swift</string>
+			<key>path</key>
+			<string>Sources/Atmos/Simulation/WildlifePhysics.swift</string>
+			<key>sourceTree</key>
+			<string>SOURCE_ROOT</string>
+		</dict>
+		<key>51080704A306C972B1C9BBD6</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXBuildFile</string>
+			<key>fileRef</key>
+			<string>8C9CB9A57DAA137EBE7E28CA</string>
 		</dict>
 		<key>178BE213848BA7F4711D43DD</key>
 		<dict>
@@ -927,6 +981,60 @@
 			<string>PBXBuildFile</string>
 			<key>fileRef</key>
 			<string>5EFE92D9FE0555E3EF9DFB61</string>
+		</dict>
+		<key>CD5CC831B7CD82D1F273AA42</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXFileReference</string>
+			<key>lastKnownFileType</key>
+			<string>sourcecode.swift</string>
+			<key>path</key>
+			<string>Sources/Atmos/UI/WeatherMenuPresentation.swift</string>
+			<key>sourceTree</key>
+			<string>SOURCE_ROOT</string>
+		</dict>
+		<key>BFC243310D90417BFA8F4C4C</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXBuildFile</string>
+			<key>fileRef</key>
+			<string>CD5CC831B7CD82D1F273AA42</string>
+		</dict>
+		<key>C1D5B20F2616F6ED2A438DB3</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXFileReference</string>
+			<key>lastKnownFileType</key>
+			<string>sourcecode.swift</string>
+			<key>path</key>
+			<string>Sources/Atmos/UI/WeatherUnits.swift</string>
+			<key>sourceTree</key>
+			<string>SOURCE_ROOT</string>
+		</dict>
+		<key>CF6E054A5AF62C70AD963681</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXBuildFile</string>
+			<key>fileRef</key>
+			<string>C1D5B20F2616F6ED2A438DB3</string>
+		</dict>
+		<key>BB8F60D07A55E983A22B57D5</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXFileReference</string>
+			<key>lastKnownFileType</key>
+			<string>sourcecode.swift</string>
+			<key>path</key>
+			<string>Sources/Atmos/UI/WelcomeAudio.swift</string>
+			<key>sourceTree</key>
+			<string>SOURCE_ROOT</string>
+		</dict>
+		<key>5AC2D9A8149C5E5AC0B0B19A</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXBuildFile</string>
+			<key>fileRef</key>
+			<string>BB8F60D07A55E983A22B57D5</string>
 		</dict>
 		<key>6DC3EC5658FC1FBF98EAC436</key>
 		<dict>
@@ -1162,6 +1270,24 @@
 			<key>fileRef</key>
 			<string>7B920DA91D4D8362B696B412</string>
 		</dict>
+		<key>60C00A1884FB2040FD4AF91B</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXFileReference</string>
+			<key>lastKnownFileType</key>
+			<string>sourcecode.c.c</string>
+			<key>path</key>
+			<string>Sources/CWeatherCore/WeatherCore.c</string>
+			<key>sourceTree</key>
+			<string>SOURCE_ROOT</string>
+		</dict>
+		<key>633D8F90569792BEFCB832DB</key>
+		<dict>
+			<key>isa</key>
+			<string>PBXBuildFile</string>
+			<key>fileRef</key>
+			<string>60C00A1884FB2040FD4AF91B</string>
+		</dict>
 		<key>A8792157CB4F27FB949C035F</key>
 		<dict>
 			<key>isa</key>
@@ -1197,12 +1323,13 @@
 				<string>823A6C95B00D351FECBE635A</string>
 				<string>552573668A9DF163D9E552CF</string>
 				<string>8201B16CFB1FBC1ADD9E5190</string>
+				<string>83BF28DB830BCC9BCC2262D3</string>
 				<string>9BD827B6161F7FC2FC4D9D6E</string>
 				<string>D40E720454BF7C1D69216ABE</string>
 				<string>ACBB34999EA149A06984A4CB</string>
 				<string>3CC8C4B482C32B1C5797E838</string>
 				<string>7945A014C2A4039589D6DC7C</string>
-				<string>7334C057B9A1D69FF209A1DB</string>
+				<string>A47DBD91CF3040464596560C</string>
 				<string>B57E970301A61807376D91CE</string>
 				<string>69E21564C8DAE4CE0AD9A478</string>
 				<string>EA63370C98D26B0D33E3AA12</string>
@@ -1233,9 +1360,11 @@
 				<string>BF336A05DD4167B06B7B8770</string>
 				<string>311F0AAD6A4572E3CF395B94</string>
 				<string>DB30AB960580B21B9B1B6AAB</string>
+				<string>48732FEADB060BF2FA80052D</string>
 				<string>8C6C3FF6AA83283B6F4C59F5</string>
 				<string>CBE1F8308D401A2CAC026C93</string>
 				<string>853EF1E12EDA087143F5ABA5</string>
+				<string>8C9CB9A57DAA137EBE7E28CA</string>
 				<string>178BE213848BA7F4711D43DD</string>
 				<string>689689D741C6B6D188B36F17</string>
 				<string>532F61CDB487DB26F5F3F73C</string>
@@ -1243,6 +1372,9 @@
 				<string>A6D1363F35BAA8D06E2C050A</string>
 				<string>D2C9FD6DFEAE7C1756946F85</string>
 				<string>5EFE92D9FE0555E3EF9DFB61</string>
+				<string>CD5CC831B7CD82D1F273AA42</string>
+				<string>C1D5B20F2616F6ED2A438DB3</string>
+				<string>BB8F60D07A55E983A22B57D5</string>
 				<string>6DC3EC5658FC1FBF98EAC436</string>
 				<string>B7CD7D79E899EE66475DF95F</string>
 				<string>213DFBBD513139C032983F24</string>
@@ -1256,6 +1388,7 @@
 				<string>A32B34A6096AECCC53EC6328</string>
 				<string>15E1004A099F0BDEDA90F398</string>
 				<string>7B920DA91D4D8362B696B412</string>
+				<string>60C00A1884FB2040FD4AF91B</string>
 				<string>0A3E27B8CA818264D75C8D81</string>
 			</array>
 			<key>sourceTree</key>
@@ -1298,12 +1431,13 @@
 				<string>2813F2A73AFA3B517BF295E0</string>
 				<string>E18165662F806D5B77D0475C</string>
 				<string>7070E7F4C4BF7A9E2F592ABA</string>
+				<string>A0059E8E12BD4C8CD57093AC</string>
 				<string>3B4E80545E426475C382C2A7</string>
 				<string>DF5D435F630FBFD066562EFC</string>
 				<string>31996F8A5841E4EB038049D8</string>
 				<string>604B5EDDFB82047AFFCFA738</string>
 				<string>7347D218227C1F215879AF61</string>
-				<string>9B6CCF134DBD6F6C076CC578</string>
+				<string>0FBD471D3CC2D9193E162641</string>
 				<string>690417CD5AC9498DD806FEE6</string>
 				<string>FCDCD4F80F00F3D198EEC044</string>
 				<string>3E29C404FFF461B47AF6EF03</string>
@@ -1334,9 +1468,11 @@
 				<string>304C010980EF409A53B5B6BE</string>
 				<string>9418F504120160928019B86F</string>
 				<string>479F0FDB33D97FBBB69CC663</string>
+				<string>B6829A2155910F607C8C5273</string>
 				<string>040A5407D14C7EADE0319463</string>
 				<string>B04EF9C69ACF2EFE9D40E4F9</string>
 				<string>50FFD0E2ECE13BA56C366FBB</string>
+				<string>51080704A306C972B1C9BBD6</string>
 				<string>1698C376418413F614B47A3E</string>
 				<string>3DF4968BF5254BB71AE0F59D</string>
 				<string>B3E36A7A89C6CA367C83167B</string>
@@ -1344,6 +1480,9 @@
 				<string>EAA537EE0F01505E50D3AD15</string>
 				<string>F8C69762214B14EAC7E22155</string>
 				<string>1E16E4C7C58CC39EEF7B2ECB</string>
+				<string>BFC243310D90417BFA8F4C4C</string>
+				<string>CF6E054A5AF62C70AD963681</string>
+				<string>5AC2D9A8149C5E5AC0B0B19A</string>
 				<string>E4EAF5B76FB671ABE884EDD9</string>
 				<string>D68F1ECCE7DFB44EB676AC13</string>
 				<string>B84F72369916759911411070</string>
@@ -1357,6 +1496,7 @@
 				<string>003BEA9E1125EF3B01C88422</string>
 				<string>46BCE75B87DA1A8C054AF009</string>
 				<string>AE2A4F1C7EAE1F7334597A97</string>
+				<string>633D8F90569792BEFCB832DB</string>
 			</array>
 			<key>runOnlyForDeploymentPostprocessing</key>
 			<integer>0</integer>
@@ -1390,6 +1530,7 @@ swift "$SRCROOT/scripts/build-icons.swift" "$SRCROOT/Resources/AppIcon.icon/Asse
 iconutil -c icns "$DERIVED_FILE_DIR/AppIcon.iconset" -o "$resources/AppIcon.icns"
 cp "$SRCROOT/LICENSE" "$resources/LICENSE.txt"
 cp "$SRCROOT/NOTICE.md" "$resources/NOTICE.md"
+cp "$SRCROOT/Resources/IntroAudio.mp3" "$resources/IntroAudio.mp3"
 </string>
 		</dict>
 		<key>20D16222A5CB9C5786FEB6B3</key>
@@ -1434,6 +1575,11 @@ cp "$SRCROOT/NOTICE.md" "$resources/NOTICE.md"
 				<array>
 					<string>$(inherited)</string>
 					<string>-I</string>
+					<string>$(SRCROOT)/Sources/CWeatherCore/include</string>
+				</array>
+				<key>HEADER_SEARCH_PATHS</key>
+				<array>
+					<string>$(inherited)</string>
 					<string>$(SRCROOT)/Sources/CWeatherCore/include</string>
 				</array>
 				<key>LIBRARY_SEARCH_PATHS</key>
@@ -1513,6 +1659,11 @@ cp "$SRCROOT/NOTICE.md" "$resources/NOTICE.md"
 				<array>
 					<string>$(inherited)</string>
 					<string>-I</string>
+					<string>$(SRCROOT)/Sources/CWeatherCore/include</string>
+				</array>
+				<key>HEADER_SEARCH_PATHS</key>
+				<array>
+					<string>$(inherited)</string>
 					<string>$(SRCROOT)/Sources/CWeatherCore/include</string>
 				</array>
 				<key>LIBRARY_SEARCH_PATHS</key>

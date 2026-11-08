@@ -72,7 +72,7 @@ final class SetupAndFog56Tests: XCTestCase {
   @MainActor func testSetupScreensHaveWorkingPermissionButtonsAndUnclippedLayouts() throws {
     let permissions = [
       SetupPermission(kind:.location,title:"Location",detail:"Follow the weather where you are, automatically.",symbol:"location",action:"Allow",granted:false),
-      SetupPermission(kind:.screen,title:"Screen Recording",detail:"Desktop reflections and colour-matched fog bloom. Images stay on this Mac; no audio.",symbol:"rectangle.on.rectangle",action:"Allow",granted:false),
+      SetupPermission(kind:.screen,title:"Screenshot Access",detail:"Desktop reflections and colour-matched fog bloom. Images stay on this Mac; no audio.",symbol:"rectangle.on.rectangle",action:"Allow",granted:false),
       SetupPermission(kind:.login,title:"Open at Login · Optional",detail:"A little atmosphere, ready whenever you sign in.",symbol:"arrow.right.circle",action:"Enable",granted:false),
       SetupPermission(kind:.automaticUpdates,title:"Automatic Updates · Optional",detail:"Quietly check, install and reopen Atmos in the background. No update windows.",symbol:"arrow.triangle.2.circlepath",action:"Enable",granted:false),
     ]
@@ -174,7 +174,7 @@ final class SetupAndFog56Tests: XCTestCase {
     var completed=0,requests=0
     controller.finished={_ in completed+=1}
     controller.permissions={[
-      SetupPermission(kind:.screen,title:"Screen Recording",detail:"Desktop reflections and fog bloom.",symbol:"rectangle.on.rectangle",action:"Allow",granted:false)
+      SetupPermission(kind:.screen,title:"Screenshot Access",detail:"Desktop reflections and fog bloom.",symbol:"rectangle.on.rectangle",action:"Allow",granted:false)
     ]}
     controller.requestPermission={_ in requests+=1}
     controller.menuAnchor={CGRect(x:700,y:950,width:24,height:24)}

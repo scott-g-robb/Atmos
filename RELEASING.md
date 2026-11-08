@@ -80,7 +80,7 @@ and a `notarytool` Keychain profile. The default profile name is `atmos`.
 
 ```sh
 xcrun notarytool store-credentials atmos
-./release.sh 0.14.1 "Release notes"
+./release.sh 0.14.2 "Release notes"
 ```
 
 The script tests and builds both architectures, notarizes and staples the app,
@@ -159,7 +159,7 @@ must project a horizontal orbit around the stem, never a flat screen-plane pinwh
 Check diagonal window throws for both velocity components, cohesive blobs and thin
 ligaments during fast cursor strokes, and sharp foam bubbles fading within a second.
 All six floating drift styles must share splash momentum. Maple rotor inclination
-and lean must vary between individual seeds. The current release is 0.14.1 (build 65).
+and lean must vary between individual seeds. The current release is 0.14.2 (build 68).
 Keep the previous stable 0.14.0 artifacts; discard superseded experimental packages.
 
 For build 50, check flotation on the landing frame and after water rises beneath
@@ -458,3 +458,103 @@ visibility worsens. Local weather details show km or m. Test unknown/zero/extrem
 visibility, alert priority, one fog overlay, gradual arrival and legacy preset reload.
 Provider references: [WeatherKit visibility](https://developer.apple.com/documentation/weatherkit/currentweather/visibility)
 and [Open-Meteo current variables](https://open-meteo.com/en/docs).
+
+
+## 0.14.2: weather overview
+
+The Live weather root shows the local condition and the combined effects under On
+your desktop. It does not show a partial measurement selection. Layers use the same
+scene description passed to rendering, including warning-driven fog and seasonal
+accents; shared atmospheric layers appear once. Changes ease within the fixed menu
+frame, using existing weather/scene refresh events rather than a new timer. The
+root Live weather page has no scroll view: conditions, combined effects and source
+fit above the fixed update footer. The redundant Compose shortcut is removed; My
+atmosphere remains the direct entry to presets and creation.
+
+Local weather groups every reported input together: temperature, feels-like, wind
+with its source direction, gusts, cloud cover, rainfall, humidity and visibility.
+Optional missing readings show a dash/Not reported, never an inferred measurement.
+Check light/dark layouts, a full combination of layers, no layers, loading-to-reading,
+all eight measurement cards with missing values, and scrolling to warnings/actions.
+CHANGELOG.md records release milestones, without per-build development history.
+
+
+0.14.2 update and units checks: periodic discovery runs about every two hours while
+awake with Automatic Updates both on and off. The toggle controls silent install,
+not discovery. No automatic check opens a panel. Read-only install locations still
+check and show availability. Successful/failed checks store their completion time;
+failed checks never claim up-to-date. Cached release versions clear the badge when
+the installed version catches up. The orange dot is separate from the template
+weather icon and cannot intercept clicks. The update footer includes the check time
+and result, and the five-layer Live weather overview must still fit without scrolling.
+
+Units defaults to Metric (°C, km/h, mm/h, m/km). Imperial converts temperature to °F,
+wind/gusts to mph, rain to in/h and visibility to ft/mi. Check both weather pages,
+manual wind and accessibility captions. Inferred/saved values and simulation inputs
+remain Celsius, km/h, millimetres and metres. Light rain keeps three decimal places
+in inches so drizzle is not rounded to zero. Settings changes apply without refetching
+weather or changing selected layers. Profiles/previews include both units and an
+available-update footer.
+
+
+## Hybrid screenshot capture (0.14.2)
+
+Water and fog share WindowReflections; there is no SCStream creation or streaming
+fallback in production. SCScreenshotManager.captureSampleBuffer is available on
+macOS 14. IOSurface-backed pixel buffers become Metal textures without CPU image
+readback. Per-window images normally refresh every 10 seconds, with new/resize,
+app activation and mouse/scroll content hints prioritised and coalesced. A 150 ms
+GPU crossfade applies only to updated images. Still geometry skips compositing.
+Geometry and display rendering remain independent; Low Power Mode uses up to
+60 Hz presentation and 30-second screenshots (battery: 20 seconds).
+
+Desktop Screenshots includes the desktop base; Window Snapshots uses clean wallpaper
+for water, including when fog simultaneously needs desktop imagery. Native window
+occlusion and the original water/fog shaders remain in place. Relevant water source
+regions and opaque window coverage exclude unnecessary windows. Minimized/closed/
+off-screen windows are removed; source changes, display changes and pause cancel
+pending work by generation and release buffers. Failures back off and retain valid
+images, never fall back to streaming. Permission denial releases cached app images.
+
+The UI requests Screenshot Access, but macOS uses the shared screen-capture TCC
+permission under Screen & System Audio Recording. No separate screenshot permission
+exists on the supported macOS 14 API. Do not promise the absence of OS indicators
+or alter system privacy controls. Verify on macOS 14 as well as current macOS.
+
+CaptureDiagnostics (--profile-desktop-capture) records timing/counts only, never
+images, names or coordinates. Direct-shell attempts reported no capture permission;
+launching signed diagnostic copies through LaunchServices picked up the existing
+grant. Both real capture runs completed. See docs/PERFORMANCE.md: screen-source
+updates decreased, but the real diagnostic did not establish a CPU/GPU reduction.
+The isolated 12-second eight-window cache benchmark uses synthetic IOSurfaces at
+120 geometry/composite ticks per second. Baseline and after JSON are in
+build/verification/hybrid-before and hybrid-after. Do not label these whole-app
+CPU measurements or include WindowServer/capture service costs in their scope.
+References: https://developer.apple.com/videos/play/wwdc2023/10136/
+and https://developer.apple.com/documentation/screencapturekit/scscreenshotmanager
+
+
+## Rust kernels and welcome audio (0.14.2)
+
+The CPU migration keeps Swift-owned buffers and C-defined layouts, checked in C
+and Rust for both architectures. The Xcode generator compiles WeatherCore.c too,
+so the SIMD ABI shim and static layout assertions match the SwiftPM test target.
+Wind, snow/botanical flight, pile transport/cursor carving, support inertia,
+resting-leaf interaction, buoyancy, bird motion and water interaction/emission
+kernels live in weather-core/src. Metal smoke/liquid/rendering work stays on the GPU.
+AppKit geometry, scene policy, emission scheduling and visual assembly stay in Swift.
+
+Window-top mouse impulse is 50% of desktop/Dock impulse. Verify slow/submerged and
+fast strokes, sideways window momentum, floating maple seeds and storm/lightning
+water, with volume conserved. The supplied IntroAudio.mp3 is copied by both build
+paths; verify its hash against the canonical resource in the signed app and DMG.
+It plays once when the welcome opens, fading out if setup finishes early; ordinary
+launches without welcome and silent auto updates do not play it.
+
+The current verification set has 242 Swift and 13 Rust tests, including optional
+profiles/renders and the live GitHub release download check. See docs/PERFORMANCE.md
+for measured before/after scope and limitations. The separate capture diagnostic
+requires an existing macOS screenshot grant; launch the signed app through macOS
+so permission attribution matches normal use. Never bypass TCC or promise
+indicator suppression. Physical Intel/macOS 14 and multi-display checks remain
+necessary; a universal build alone is not device validation.

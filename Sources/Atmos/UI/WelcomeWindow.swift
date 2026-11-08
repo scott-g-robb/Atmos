@@ -14,6 +14,7 @@ struct SetupPermission {
 /// A versioned, optional introduction. System permission dialogs always remain
 /// in macOS's control; the guide completes only when the actual status menu opens.
 final class WelcomeController: NSObject {
+  private let introAudio = WelcomeAudio()
   var appIcon: NSImage?
   var permissions: () -> [SetupPermission] = { [] }
   var requestPermission: (SetupPermission.Kind) -> Void = { _ in }
@@ -56,6 +57,7 @@ final class WelcomeController: NSObject {
     NSApp.activate(ignoringOtherApps: true)
     if let page = window.contentView as? SetupPageView { page.prepareEntrance(calm: calm) }
     window.makeKeyAndOrderFront(nil)
+    introAudio.play()
     observer = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification,
       object: nil, queue: .main) { [weak self] _ in
         guard let self, progress.page == .permissions else { return }
@@ -234,6 +236,7 @@ final class WelcomeController: NSObject {
   private func finish() {
     guard !completed else { return }
     completed = true
+    introAudio.stop()
     permissionTimer?.invalidate(); anchorTimer?.invalidate()
     permissionTimer = nil; anchorTimer = nil
     window?.orderOut(nil); window = nil

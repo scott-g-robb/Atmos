@@ -54,6 +54,7 @@ swift scripts/build-icons.swift Resources/AppIcon.icon/Assets/Weather.png build/
 iconutil -c icns build/AppIcon.iconset -o "$app/Contents/Resources/AppIcon.icns"
 cp LICENSE "$app/Contents/Resources/LICENSE.txt"
 cp NOTICE.md "$app/Contents/Resources/NOTICE.md"
+cp Resources/IntroAudio.mp3 "$app/Contents/Resources/IntroAudio.mp3"
 if [[ -n "${BUNDLE_IDENTIFIER:-}" ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_IDENTIFIER" "$app/Contents/Info.plist"
 fi

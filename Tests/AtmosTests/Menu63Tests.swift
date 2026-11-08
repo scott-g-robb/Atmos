@@ -7,7 +7,7 @@ import XCTest
 final class Menu63Tests: XCTestCase {
   @MainActor private func saved() -> () -> Void {
     let store=UserDefaults.standard
-    let keys=["liveWeather","weatherEffect","seasonalDrift","wildlifeEffect","manualWindSpeed","manualCloudCoverage","snowfall","autumn"]
+    let keys=["liveWeather","weatherEffect","seasonalDrift","wildlifeEffect","manualWindSpeed","manualCloudCoverage","snowfall","autumn","weatherUnits"]
     let values=keys.map{store.object(forKey:$0)}
     Preferences.liveWeather=false; Preferences.manualScene=WeatherScene(primary:.none)
     return {for (key,value) in zip(keys,values) {if let value {store.set(value,forKey:key)}else{store.removeObject(forKey:key)}}}
@@ -71,9 +71,18 @@ final class Menu63Tests: XCTestCase {
     XCTAssertEqual(commands.count,3)
     XCTAssertFalse(commands.contains{$0.action.map(NSStringFromSelector)=="openWeatherProvider"})
     for appearance in [NSAppearance.Name.aqua,.darkAqua] {
-      for (page,category,live,loading) in [("",0,false,false),("",0,true,false),("",0,true,true),("manual",0,false,false),("manual",1,false,false),("manual",2,false,false),("manual",3,false,false),("presets",0,false,false),("settings",0,false,false),("weather",0,true,false)] {
+      for (page,category,live,loading) in [("",0,false,false),("",0,true,false),("",1,true,false),("",0,true,true),("manual",0,false,false),("manual",1,false,false),("manual",2,false,false),("manual",3,false,false),("presets",0,false,false),("settings",0,false,false),("weather",0,true,false),("weather",1,true,false)] {
         Preferences.liveWeather=live
+        Preferences.weatherUnits = page == "weather" && category == 1 ? .imperial : .metric
+        model.lastUpdateCheck=Date();model.updateAvailable=page.isEmpty && category == 1
+        model.updateStatus=model.updateAvailable ? "Update available":"Up-To-Date"
         model.reading=live && !loading ? WeatherSnapshot(time:Date().timeIntervalSince1970,weatherCode:51,temperature:12,windSpeed:14,windDirection:270,precipitation:0.2,isDay:1) : nil
+        if model.reading != nil {
+          model.reading?.cloudCover=58;model.reading?.humidity=86;model.reading?.apparentTemperature=11
+          model.reading?.windGust=22;model.reading?.visibility=8_000
+          model.reading?.precipitationUnit="mm/h"
+        }
+        model.activeScene=model.reading.map { WeatherScene(weather:$0,date:Date(timeIntervalSince1970:1_794_139_290)) }
         model.place="Hounslow"
         let view=NSHostingView(rootView:AtmosMenuView(model:model,page:page,category:category).frame(width:320,height:520))
         view.frame=CGRect(x:0,y:0,width:320,height:520)

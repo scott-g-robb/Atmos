@@ -3,8 +3,8 @@ import ScreenCaptureKit
 
 /// Preflight is a hint. A successful, explicitly requested ScreenCaptureKit check
 /// is authoritative for this process; it does not start a capture stream.
-final class ScreenRecordingAccess {
-  static let shared = ScreenRecordingAccess()
+final class ScreenshotAccess {
+  static let shared = ScreenshotAccess()
   enum State: Equatable { case unknown, checking, granted, authorizationNeeded }
   private(set) var state: State = .unknown
   private var verifiedByKit = false

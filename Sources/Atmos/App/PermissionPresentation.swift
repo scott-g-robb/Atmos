@@ -11,7 +11,7 @@ struct PermissionPresentation {
       return Self(
         status: "Not granted",
         detail:
-          "Allow this copy of Atmos in System Settings, then Recheck Screen Recording. If macOS asks to relaunch, choose Restart Atmos. Wallpaper Only works without access.",
+          "Allow this copy of Atmos in System Settings, then Recheck Screenshot Access. If macOS asks to relaunch, choose Restart Atmos. Wallpaper Only works without access.",
         granted: false)
     }
     let detail =
@@ -20,8 +20,8 @@ struct PermissionPresentation {
       : stopped
         ? "Stopped in macOS · Select a reflection source to resume."
         : active
-          ? "In use · Images stay on this Mac; no audio is captured."
-          : "Not in use · Capture starts only for visible water or fog bloom."
+          ? "Taking a screenshot · Images stay on this Mac; no video or audio."
+          : "Cached screenshots · New images only for visible water or fog bloom."
     return Self(status: active ? "Granted · In use" : "Granted", detail: detail, granted: true)
   }
 

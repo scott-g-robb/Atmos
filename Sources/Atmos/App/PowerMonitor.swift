@@ -1,7 +1,8 @@
 import Foundation
 import IOKit.ps
 
-/// Adjust particle density and reflection resolution without capping animation refresh.
+/// Native refresh normally; Low Power Mode reduces presentation to at most 60 Hz
+/// and lowers particle density, screenshot cadence and reflection resolution.
 enum PowerBudget {
   case full
   /// On battery: reduce desktop-capture resolution.

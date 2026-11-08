@@ -10,7 +10,7 @@
   <a href="#build">Build from source</a>
 </p>
 <p align="center">macOS 14+ · Apple silicon &amp; Intel · Free for noncommercial use</p>
-<p align="center">Current build: <strong>0.14.1 (65)</strong> · <a href="CHANGELOG.md">What's changed since 0.13.2</a></p>
+<p align="center">Current build: <strong>0.14.2 (68)</strong> · <a href="CHANGELOG.md">What's changed since 0.13.2</a></p>
 
 ![Snow, rain, storm clouds, mist, fireflies and autumn leaves rendered by Atmos](docs/assets/scenes.png)
 
@@ -23,7 +23,8 @@ Choose a scene, or let Live Weather follow the sky outside. Most Cloud Wisps pas
 ![Rain, mist and fireflies in motion](docs/assets/interaction.gif)
 
 *Rendered with the app's Metal renderer against sample windows. The preview is 30 fps;
-the app targets your display's native refresh rate, including 120 Hz ProMotion.*
+the app targets your display's native refresh rate, including 120 Hz ProMotion
+(up to 60 Hz in Low Power Mode).*
 
 - **Sweep and scatter.** Push through snow and leaves, stir mist, or flick water into splashes.
 - **Move your windows.** Drifts follow their ledges. Fast drags send snow, leaves and water falling to the surfaces below.
@@ -86,8 +87,8 @@ and also sit behind the real objects, with no foreground filter or inverted wall
 mask. Window-edge colours are cached on the GPU and follow the current window geometry
 at display refresh, avoiding delayed-capture flicker. A soft contact halo bridges the
 window shadow. Atmos's welcome and update panels stay
-clear and above all effects. Bloom uses Screen Recording while fog is visible,
-shares the live capture stream with water, and can be disabled separately in Settings.
+clear and above all effects. Bloom uses occasional screenshots while fog is visible,
+shares the window texture cache with water, and can be disabled separately in Settings.
 
 Available Apple Weather warnings appear above the current conditions with the issuing
 agency's original text and a details link. Active fog warnings add fog while retaining
@@ -147,8 +148,13 @@ it, use **System Settings → Privacy & Security → Open Anyway**. See
 Atmos's custom dropdown shares the welcome and update screens' soft lighting,
 rounded surface and light/dark appearance. A small integrated pointer follows the
 menu-bar icon; the panel stays narrow and compact, with no continuous UI animation.
-**Live weather** keeps the overview simple. Click the weather card for conditions,
-warnings, source selection and Refresh Weather. **My atmosphere** shows saved presets
+**Live weather** shows local conditions and an **On your desktop** list of the combined
+effects, including clouds, haze/fog, seasonal drift and wildlife when present.
+The main Live weather tab fits without scrolling. Click the
+weather card for the complete measurement set in one place: temperature, feels-like,
+wind/direction, gusts, cloud cover, rainfall, humidity and visibility. Unreported values
+remain unknown. Warnings, source selection and Refresh Weather are on that page too.
+**My atmosphere** shows saved presets
 for one-click switching. Each preset's arrow reveals **Edit** and **Delete**. With no
 presets, it opens the editor directly. **New atmosphere** starts with no effects,
 4 km/h wind, Medium intensity and 0% cloud coverage. Names default to `atmos1`,
@@ -160,6 +166,9 @@ suitable cloud coverage, which you can then adjust. Select an active tile again 
 remove that layer. **Save** stays at the bottom right and stores all three layers
 and advanced settings. A preset's icon follows Weather, then Drift, then Wildlife.
 Empty atmospheres cannot be saved. Presets stay on this Mac.
+**Settings → Units** switches all weather displays between Metric (the default:
+Celsius, km/h, mm/h, metres/kilometres) and Imperial (Fahrenheit, mph, in/h,
+feet/miles). Saved values and simulation calculations keep their original units.
 **Settings** holds the full surface, reflection, placement, screenshot, full-screen
 and login controls. Manual sliders stay out of Live Weather.
 **Check for Updates** stays in a separate footer beside Quit. Clicking outside closes
@@ -171,13 +180,13 @@ scaled consistently and appears once per weather view.
 The rounded welcome and permissions screens use native controls, light/dark
 appearance and smooth, centred transitions, with reduced-motion alternatives.
 Effects return gently after Skip or setup completion, including previously formed clouds. Location
-supports Live Weather; Screen Recording supports desktop reflections and fog bloom;
+supports Live Weather; Screenshot Access supports desktop reflections and fog bloom;
 Open at Login and Automatic Updates are optional. Permissions are requested only when you choose to allow
 them or explicitly enable a feature that needs them. Missing permissions never block
 the **Next** button.
 
 **Settings → Permissions & Activity** shows granted access and current use for
-Screen Recording, Location Services and Open at Login, with links to macOS settings.
+Screenshot Access, Location Services and Open at Login, with links to macOS settings.
 **Settings → Screen Reflections** stops or enables desktop capture without revoking
 the macOS permission for water; **Fog Bloom** controls capture for fog independently.
 Capture stops when neither visible water nor fog bloom needs it.
@@ -185,8 +194,8 @@ Capture stops when neither visible water nor fog bloom needs it.
 
 | Source | What appears in the water |
 | --- | --- |
-| **Live Desktop** | Live windows, video and the cursor; capture adapts to desktop activity |
-| **Window Snapshots** | Cached window images that follow window movement; content refreshes about once a second |
+| **Desktop Screenshots** | Cached desktop and window images follow live geometry; refreshed every 10 seconds and on changes |
+| **Window Snapshots** | Window-only water images follow live geometry; refreshed every 10 seconds and on changes |
 | **Wallpaper Only** | Wallpaper reflections without capturing other apps |
 
 Water remains interactive with every source. Cursor disturbances refill quickly, and
@@ -219,8 +228,12 @@ replaced and reopened in the same location. If no
 newer version exists, it says **Atmos is up to date**. The prompt and progress panel
 share the welcome screens’ design.
 
-**Automatic Updates** is an optional setup choice and Settings toggle. When enabled,
-Atmos checks about every two hours while running and awake. Automatic downloads,
+Atmos checks for releases about every two hours while running and awake, whether
+automatic installation is enabled or not. Below **Check for Updates**, the menu shows
+the last-check time and **Up-To-Date**, **Update available** or a failed-check status.
+An available update adds a small orange dot beside the menu-bar weather icon.
+**Automatic Updates** is an optional setup choice and Settings toggle controlling
+installation. When enabled, automatic downloads,
 installation and background relaunch are silent. Only that relaunch skips welcome;
 a later manual installation always presents setup again.
 Update checks stay paused during setup. Automatic installation never opens an administrator
@@ -235,7 +248,7 @@ Failed replacement restores the previous copy. There is no persistent update hel
 ## Privacy & weather sources
 
 - **Location Services** is requested through setup or an explicit Live Weather/Refresh action. A more accurate fix and neighbourhood-first place names improve local labels. Weather coordinates are rounded to roughly a kilometre; reverse geocoding uses coordinates rounded to roughly 100 metres. Location and weather readings remain in memory.
-- **Screen Recording** is needed for desktop/window reflections and colour-aware fog bloom. Images stay on your Mac, are never saved or uploaded, and contain no audio. Atmos excludes its own windows from capture to avoid feedback. macOS controls the recording indicator; **Stop Sharing** is respected until an explicit capture choice resumes it.
+- **Screenshot Access** permits occasional reduced-resolution screenshots for water reflections and fog bloom. No `SCStream`, video or audio recording is used. IOSurface images stay in GPU-accessible memory and are never saved or uploaded. Atmos windows and off-screen/fully covered windows are excluded. macOS still grants this through its **Screen & System Audio Recording** privacy category and controls any access indicators; screenshot APIs do not provide a promise that no indicator will appear. Stop Sharing/permission revocation is respected until an explicit capture choice resumes it.
 - **Automatic · Apple First** tries Apple on every request, retries it once after a second, then clearly labels any Open-Meteo fallback. Transient fallback checks Apple again after 30 seconds, backing off to five minutes. Selecting Apple also permits this labelled fallback after its retry; selecting Open-Meteo requests only that provider. Attribution-image failures never discard a successful weather reading.
 
 The distributed app uses native WeatherKit authorization for all Macs; users do not
@@ -245,8 +258,8 @@ works without an API key. Atmos uses the
 supported Apple weather service; it does not read the Weather app's private files.
 See [weather setup](RELEASING.md#apple-weather).
 
-If Screen Recording looks enabled in macOS but unavailable in Atmos, use
-**Settings → Permissions & Activity → Recheck Screen Recording**. This explicitly
+If Screenshot Access looks enabled in macOS but unavailable in Atmos, use
+**Settings → Permissions & Activity → Recheck Screenshot Access**. This explicitly
 verifies access with ScreenCaptureKit without starting a capture stream. macOS can
 require a fresh grant or relaunch after a signing-identity change; **Restart Atmos…**
 is available beside Recheck. Stop Sharing remains respected.
@@ -254,10 +267,14 @@ is available beside Recheck. Stop Sharing remains respected.
 ## Built for macOS
 
 Swift and AppKit handle the menu, displays and system integration. Metal renders the
-effects and simulates cloud flow; an allocation-free Rust core handles particles and
-water. Metal reconstructs liquid contours directly in GPU buffers, with a Rust
+effects and simulates cloud flow; an allocation-free Rust core handles wind shelter,
+particles, pile transport, cursor/water interactions, buoyancy and wildlife motion. Metal reconstructs liquid contours directly in GPU buffers, with a Rust
 fallback; splash merging uses fixed storage and conserves mass and momentum.
-Buffers and pipelines are reused, and desktop capture adapts independently
+The welcome entrance plays the supplied introduction audio once. Silent background
+updates and launches that do not show the welcome remain quiet.
+
+[Performance notes](docs/PERFORMANCE.md) describe the measured before/after results
+and what remains unverified. Buffers and pipelines are reused, and desktop capture adapts independently
 of animation. Visible animations target each display's native rate; macOS may lower
 the physical refresh rate for power or thermal reasons.
 

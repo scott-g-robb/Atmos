@@ -152,19 +152,19 @@ final class ScreenSnow {
   func setReflections(_ enabled: Bool) {
     reflection.enabled = enabled
     reflection.live = Preferences.liveReflections
-    tracker.usesSnapshotReflections = enabled && !reflection.live
+    tracker.usesSnapshotReflections = enabled || reflection.fogBloomEnabled
     if !enabled && !renderer.hasFog {
       reflection.stop()
       renderer.reflection = nil
-      renderer.reflectionFrame = nil
     }
   }
 
   func setFogBloom(_ enabled: Bool) {
     reflection.fogBloomEnabled = enabled
+    tracker.usesSnapshotReflections = reflection.enabled || enabled
     if !enabled {
       renderer.fogBloomTexture = nil
-      if !renderer.hasWater { reflection.stop(); renderer.reflectionFrame = nil }
+      if !renderer.hasWater { reflection.stop() }
     }
     wake()
   }
@@ -235,7 +235,7 @@ final class ScreenSnow {
     backgroundFog.window.showsInScreenshots = Preferences.showInScreenshots
     renderer.backgroundFogOverlay = backgroundFog
     view = Self.makeView(device: device, size: screen.frame.size)
-    tracker.usesSnapshotReflections = reflection.enabled && !reflection.live
+    tracker.usesSnapshotReflections = reflection.enabled || reflection.fogBloomEnabled
 
     renderer.cursorLocation = { [unowned window] in
       let mouse = NSEvent.mouseLocation
@@ -248,7 +248,7 @@ final class ScreenSnow {
       let panels = AtmosPanelPresentation.visibleFrames.map { $0.offsetBy(dx: -self.screen.frame.minX, dy: -self.screen.frame.minY) }
       if panels != panelFrames { panelFrames = panels; updatePlacement() }
       let update = tracker.poll(now: now, eager: NSEvent.pressedMouseButtons != 0,
-        frameInterval: renderer.hasFog ? 1/Double(renderer.nativeFrameRate) : 1.0/62)
+        frameInterval: (renderer.hasFog || renderer.hasWater) ? 1/Double(renderer.presentationFrameRate) : 1.0/62)
       let geometryChanged = geometryRevision != tracker.geometryRevision
       if geometryChanged {
         updatePlacement()
@@ -267,14 +267,12 @@ final class ScreenSnow {
     }
     renderer.sceneLight = { [unowned self] now in
       light.update(screen: self.screen, now: now)
-      reflection.preferredFrameRate = tracker.hasDepartingWindows ? renderer.nativeFrameRate : renderer.captureFrameRate
       renderer.reflection = reflection.update(
         screen: self.screen, now: now,
         active: (renderer.hasWater || renderer.hasFog) && active && !asleep && !covered,
-        windows: tracker.reflectionWindows, water: renderer.hasWater, fog: renderer.hasFog)
-      renderer.reflectionFrame = reflection.displayedFrame
+        windows: tracker.reflectionWindows, water: renderer.hasWater, fog: renderer.hasFog, regions: renderer.reflectionRegions(now:now))
       renderer.reflectionRect = reflection.waterRect
-      renderer.fogCaptureTime = reflection.displayedFrame?.capturedAt
+      renderer.fogCaptureTime = reflection.compositedAt ?? now
       renderer.fogBloomTexture = reflection.bloomTexture
       renderer.fogWallpaperTexture = reflection.wallpaperTexture
       renderer.fogBloomRect = reflection.bloomRect
@@ -286,7 +284,6 @@ final class ScreenSnow {
       // End capture here as well, before pausing the display link.
       reflection.stop()
       renderer.reflection = nil
-      renderer.reflectionFrame = nil
       renderer.fogBloomTexture = nil
       view.isPaused = true
       renderer.releaseFrames(of: view)
@@ -350,6 +347,8 @@ final class ScreenSnow {
 
   func apply(_ budget: PowerBudget) {
     renderer.budget = budget
+    reflection.powerBudget = budget
+    view.preferredFramesPerSecond = renderer.presentationFrameRate
     renderer.configureLayers {
       $0.density = budget == .saver ? 0.75 : 1
       $1.density = budget == .saver ? 0.65 : 1
@@ -370,7 +369,6 @@ final class ScreenSnow {
     if !active {
       reflection.stop()
       renderer.reflection = nil
-      renderer.reflectionFrame = nil
       renderer.fogBloomTexture = nil
     }
     if !active { renderer.releaseFrames(of: view) }

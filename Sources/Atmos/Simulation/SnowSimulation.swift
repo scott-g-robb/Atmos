@@ -1,3 +1,4 @@
+import CWeatherCore
 import CoreGraphics
 import Foundation
 import simd
@@ -45,79 +46,33 @@ struct PileLayer {
   var drift: Float
 }
 
-private struct Flake {
-  var retirementLife: Float = .greatestFiniteMagnitude
-  var position: SIMD2<Float>
-  var velocity: SIMD2<Float>
-  var fallSpeed: Float
-  var size: Float
-  var depth: Float
-  var alpha: Float
-  var soft: Float
-  var phase: Float
-  var swayRate: Float
-  var swayAmount: Float
-  var settles: Bool
-  /// Scales the snow it leaves where it lands.
-  var mass: Float = 1
-  var tint = SIMD3<Float>(repeating: 1)
-  var tintAmount: Float = 0
-  /// The direction of the gust that caught the flake and carries it off the screen; zero until then.
-  var blown: Float = 0
-  var leaf: Float = 0
-}
-
-private struct Grain {
-  var position: SIMD2<Float>
-  var velocity: SIMD2<Float>
-  var area: Float
-  var size: Float
-  /// A lump holds together in flight and bursts into powder where it lands; zero for loose snow.
-  var lump: Float = 0
-  /// Powder carried off by a gust: it rides the wind off the screen instead of settling.
-  var blown = false
-  /// For a leaf, picks its shape and colour.
-  var seed = Float.random(in: 0.001...1)
-  /// Only the bulk under fallen leaves, with no leaf of its own: unseen, it falls and adds to the heap it lands on.
-  var bulk = false
-}
+private typealias Flake = SHSnowFlake
+private typealias Grain = SHSnowGrain
 
 /// A leaf come to rest on a heap or a window: it lies flat on top, riding along with what it lies on, until others
 /// cover it. Its bulk is in the heap under it, so leaves pile up on one another.
+@dynamicMemberLookup
 private struct LyingLeaf {
-  let layer: SnowLayer
-  /// From the layer's base along it, and up from the base to where the leaf rests and to the top of its own bulk.
-  var x: Float
-  var rest: Float
-  var top: Float
-  let size: Float
-  let seed: Float
-  let tilt: Float
-  /// Half a turn when it came down pointing the other way.
-  let around: Float
-  /// How it was turned and tumbled in the air, and how far along the surface it slides, while it settles.
-  let fromTurn: Float
-  let fromFlip: Float
-  let slide: Float
-  let settling: Float
-  var settled: Float = 0
-  let life: Float
-  var age: Float = 0
-  var fade: Float = 1
+  let layer:SnowLayer
+  var state:SHRestingLeaf
+  subscript<T>(dynamicMember key:WritableKeyPath<SHRestingLeaf,T>)->T {
+    get {state[keyPath:key]}
+    set {state[keyPath:key]=newValue}
+  }
+  init(layer:SnowLayer,x:Float,rest:Float,top:Float,size:Float,seed:Float,tilt:Float,
+    around:Float,fromTurn:Float,fromFlip:Float,slide:Float,settling:Float,life:Float) {
+    self.layer=layer
+    state=SHRestingLeaf(x:x,rest:rest,top:top,size:size,seed:seed,tilt:tilt,around:around,
+      fromTurn:fromTurn,fromFlip:fromFlip,slide:slide,settling:settling,settled:0,life:life,age:0,fade:1)
+  }
 }
 
 /// Powder thrown up by a lump bursting: it billows, slows in the air and fades without settling.
-private struct Mote {
-  var position: SIMD2<Float>
-  var velocity: SIMD2<Float>
-  var size: Float
-  var alpha: Float
-  var age: Float = 0
-  var life: Float
-}
+private typealias Mote = SHSnowMote
 
 private struct RandomSource {
   private var state = UInt64.random(in: 1...UInt64.max)
+  mutating func withState<T>(_ body:(inout UInt64)->T)->T {body(&state)}
 
   mutating func next() -> Float {
     state ^= state << 13
@@ -276,6 +231,7 @@ final class SnowSimulation {
   private var ledgeList: [SnowLayer] = []
   private var layers: [SnowLayer]
   private var heldLayers: [SnowLayer] = []
+  private var cursorCuts:[SHSnowCut]=[]
   private var flakes: [Flake] = []
   private var grains: [Grain] = []
   private var motes: [Mote] = []
@@ -786,56 +742,17 @@ final class SnowSimulation {
   /// window drops away faster than gravity or stops short after rising.
   private func carry(_ ledge: SnowLayer, dt: Float) {
     guard clock >= ledge.motionGraceUntil else { return }
-    let previousVelocity = ledge.trackVelocity
-    smoothDamp(&ledge.track, &ledge.trackVelocity, toward: ledge.origin, time: trackTime, dt: dt)
-    let acceleration = (ledge.trackVelocity - previousVelocity) / dt
-    // Agitation is vibration: two consecutive back-and-forth swings, not a single start or stop.
-    ledge.agitation *= exp(-dt / 0.3)
-    let magnitude = simd_length(acceleration)
-    if magnitude > 1, simd_dot(acceleration, ledge.swingDirection) < 0 {
-      ledge.agitation = max(
-        ledge.agitation, min(ledge.previousSwingPeak, ledge.swingPeak) / gravity)
-      ledge.previousSwingPeak = ledge.swingPeak
-      ledge.swingPeak = magnitude
-      ledge.swingDirection = acceleration / magnitude
-    } else {
-      ledge.swingPeak = max(ledge.swingPeak, magnitude)
-      if magnitude > 1 && ledge.swingDirection == .zero {
-        ledge.swingDirection = acceleration / magnitude
-      }
-    }
-
-    guard ledge.top > 0.05 else {
-      ledge.offset = .zero
-      ledge.offsetVelocity = .zero
-      return
-    }
-
-    var lift = ledge.offset.y
-    var liftVelocity = ledge.offsetVelocity.y
     let (stick, hold, rub) = autumn ? (leafAdhesion, leafGrip, leafSlip) : (adhesion, grip, slip)
-    let fall = -gravity - acceleration.y
-    if lift > 0 || fall > stick {
-      liftVelocity += fall * dt
-      lift += liftVelocity * dt
-      if lift <= 0 {
-        lift = 0
-        liftVelocity = 0
-      }
-    }
-
-    let pressure = lift > 0 ? 0 : max(0, gravity + stick + acceleration.y)
-    let drive = -acceleration.x
-    var slideVelocity = ledge.offsetVelocity.x
-    if !(slideVelocity == 0 && abs(drive) <= hold * pressure) {
-      let direction: Float =
-        slideVelocity != 0 ? (slideVelocity > 0 ? 1 : -1) : (drive > 0 ? 1 : -1)
-      let next = slideVelocity + (drive - direction * rub * pressure) * dt
-      slideVelocity = pressure > 0 && next * direction <= 0 ? 0 : next
-    }
-
-    var slide = ledge.offset.x + slideVelocity * dt
-    let carried = ledge.trackVelocity + SIMD2(slideVelocity, liftVelocity)
+    var state=SHSnowSupport(track:ledge.track,trackVelocity:ledge.trackVelocity,offset:ledge.offset,
+      offsetVelocity:ledge.offsetVelocity,swingDirection:ledge.swingDirection,agitation:ledge.agitation,
+      swingPeak:ledge.swingPeak,previousSwingPeak:ledge.previousSwingPeak)
+    sh_snow_support(&state,ledge.origin.x,ledge.origin.y,dt,trackTime,gravity,stick,hold,rub,ledge.top)
+    ledge.track=state.track;ledge.trackVelocity=state.trackVelocity;ledge.swingDirection=state.swingDirection
+    ledge.agitation=state.agitation;ledge.swingPeak=state.swingPeak;ledge.previousSwingPeak=state.previousSwingPeak
+    guard ledge.top > 0.05 else {ledge.offset=state.offset;ledge.offsetVelocity=state.offsetVelocity;return}
+    let lift=state.offset.y,liftVelocity=state.offsetVelocity.y,slideVelocity=state.offsetVelocity.x
+    var slide=state.offset.x
+    let carried=state.trackVelocity+state.offsetVelocity
     while abs(slide) >= columnWidth {
       let direction = slide > 0 ? 1 : -1
       let dropped = ledge.slideColumn(toward: direction)
@@ -1225,57 +1142,20 @@ final class SnowSimulation {
   private func carve(
     _ layer: SnowLayer, at center: SIMD2<Float>, velocity: SIMD2<Float>, travel: Float, final: Bool
   ) {
-    let radius = cursorRadius
-    let lower = max(0, Int(((center.x - radius - layer.base.x) / columnWidth).rounded(.down)))
-    let upper = min(
-      layer.count - 1, Int(((center.x + radius - layer.base.x) / columnWidth).rounded(.down)))
-    guard lower <= upper else { return }
-
-    let local = center.y - layer.base.y
-    let sprayShare =
-      autumn
-      ? smoothstep(60, 500, simd_length(velocity)) : smoothstep(60, 420, simd_length(velocity))
-    var pushedLeft: Float = 0
-    var pushedRight: Float = 0
-
-    for i in lower...upper where layer.visible[i] {
-      let x = layer.centerX(i)
-      let dx = x - center.x
-      let reach = radius * radius - dx * dx
-      guard reach > 0 else { continue }
-      let half = reach.squareRoot()
-      // Heights here are measured up from the bed under this column.
-      let bedLevel = layer.bed[i]
-      let bottom = max(0, local - half - bedLevel)
-      let top = local + half - bedLevel
-      guard top > bottom else { continue }
-      let h = layer.heights[i]
-      let buried = h > top
-      if final && !buried && h >= bottom - 1 {
-        if !heldLayers.contains(where: { $0 === layer }) { heldLayers.append(layer) }
-        layer.hold(i)
+    let radius=cursorRadius
+    let count=layer.carve(center:center,velocity:velocity,radius:radius,travel:travel,final:final,
+      autumn:autumn,leafCover:leafCover,cuts:&cursorCuts)
+    var pushedLeft:Float=0,pushedRight:Float=0
+    for j in 0..<count {
+      let cut=cursorCuts[j]
+      if cut.held != 0 {
+        if !heldLayers.contains(where:{$0 === layer}) {heldLayers.append(layer)}
+        layer.hold(Int(cut.index))
       }
-      guard h > bottom + 0.01 else { continue }
-
-      // A buried cursor only displaces the snow it sweeps through; the rest rests on top of it.
-      let removed = buried ? (top - bottom) * min(1, travel / (2 * radius)) : h - bottom
-      guard removed > 0.001 else { continue }
-      layer.set(i, h - removed)
-      lastCursorPush = clock
-      heightsChanged = true
-
-      var area = removed * columnWidth
-      if autumn {
-        // The lying leaves on top fly off by themselves; only the mass under them is swept out.
-        let hidden = max(0, leafCover - (buried ? h - top : 0))
-        area = max(0, removed - hidden) * columnWidth
-      }
-      let surface = layer.floor(i) + (buried ? h - removed : h)
-      let sprayed =
-        sprayShare > 0
-        ? emit(area * sprayShare, from: SIMD2(x, surface), center: center, velocity: velocity) : 0
-      let side = abs(velocity.x) > 40 ? velocity.x : dx
-      if side < 0 { pushedLeft += area - sprayed } else { pushedRight += area - sprayed }
+      guard cut.removed != 0 else {continue}
+      lastCursorPush=clock;heightsChanged=true
+      let sprayed=cut.sprayed>0 ? emit(cut.sprayed,from:SIMD2(cut.x,cut.surface),center:center,velocity:velocity):0
+      if cut.side<0 {pushedLeft+=cut.area-sprayed} else {pushedRight+=cut.area-sprayed}
     }
 
     for (area, x) in [
@@ -1349,64 +1229,40 @@ final class SnowSimulation {
     return to <= ground.surface(i) ? (ground, i) : nil
   }
 
+  private func snowStep(dt: Float) -> SHSnowStep {
+    var s=SHSnowStep()
+    s.dt=dt;s.time=Float(clock.truncatingRemainder(dividingBy:1000));s.wind=breeze()+slideWind
+    s.weatherWind=weatherWind;s.slideWind=slideWind;s.gustWind=gustWind;s.width=width
+    s.gravity=gravity;s.style=botanicalStyle;s.grainDrag=grainDrag
+    if retiring {s.flags |= 1};if autumn {s.flags |= 2}
+    if let cursor,let from=cursorFrom {
+      s.flags |= 4;s.cursorX=cursor.x;s.cursorY=cursor.y;s.previousX=from.x;s.previousY=from.y
+      s.cursorVX=cursorVelocity.x;s.cursorVY=cursorVelocity.y
+    }
+    if let wake=cursorWake() {s.flags |= 8;s.wakeX=wake.center.x;s.wakeY=wake.center.y;s.wakeVX=wake.velocity.x;s.wakeVY=wake.velocity.y}
+    return s
+  }
+  private func withFlow<T>(_ body:(UnsafePointer<SIMD4<Float>>?,Int,Int,Float,Float)->T)->T {
+    guard let airflow else {return body(nil,0,0,48,weatherWind)}
+    return airflow.cells.withUnsafeBufferPointer {body($0.baseAddress,airflow.columns,airflow.rows,airflow.spacing,airflow.base)}
+  }
   private func advanceFlakes(dt: Float) {
-    let wind = breeze() + slideWind
-    // A Space's wind is short: the flakes take it up faster than the slow breeze, or it would be gone first.
-    let follow = min(1, dt * (1.2 + abs(slideWind) * 0.03))
-    let settle = min(1, dt * 1.6)
-    let wake = cursorWake()
-
+    guard !flakes.isEmpty else {return}
+    var context=snowStep(dt:dt)
+    flakes.withUnsafeMutableBufferPointer { particles in
+      withFlow { cells,columns,rows,spacing,base in
+        sh_advance_snow_flakes(particles.baseAddress,particles.count,&context,cells,columns,rows,spacing,base)
+      }
+    }
     var i = flakes.count - 1
     while i >= 0 {
-      var flake = flakes[i]
-      if retiring {
-        flake.retirementLife -= dt
-        if flake.retirementLife <= 0 {
-          removeFlake(i)
-          i -= 1
-          continue
-        }
-        if flake.retirementLife < 1 { flake.alpha = min(flake.alpha, flake.retirementLife) }
+      let flake = flakes[i]
+      if flake.status == 1 {removeFlake(i);i-=1;continue}
+      if flake.status == 2 {
+        popDandelion(at:flake.position,velocity:flake.velocity,size:flake.size,area:flake.size*leafBulk)
+        recycle(i);i-=1;continue
       }
-      if flake.blown != 0 {
-        // The nearer the flake, the faster the gust seems to carry it.
-        flake.velocity.x +=
-          (flake.blown * gustWind * (1.3 + 1.3 * flake.depth) - flake.velocity.x) * min(1, dt * 2.5)
-      } else {
-        let local = airflow?.sample(flake.position) ?? SIMD2(weatherWind, 0)
-        let localWind = wind - weatherWind + local.x
-        let response: Float =
-          botanicalStyle == 3 || botanicalStyle == 6 ? 1.6 : botanicalStyle == 5 ? 0.8 : 1
-        flake.velocity.x +=
-          (localWind * (0.35 + 0.65 * flake.depth) - flake.velocity.x) * min(1, follow * response)
-        flake.velocity.y += local.y * dt * response
-
-      }
-      flake.velocity.y += (-flake.fallSpeed - flake.velocity.y) * settle
-
-      if botanicalStyle == 3 && flake.leaf > 2 && touchesDandelion(flake.position, size: flake.size) {
-        popDandelion(at: flake.position, velocity: flake.velocity, size: flake.size, area: flake.size * leafBulk)
-        recycle(i); i -= 1; continue
-      }
-      if let wake { stir(&flake.velocity, at: flake.position, in: wake, dt: dt) }
-
-      // Harmonic ratios 2.3 and 1.3 stay continuous across the 20π wrap.
-      flake.phase += flake.swayRate * dt
-      if flake.phase > phaseWrap { flake.phase -= phaseWrap }
-      if flake.tintAmount > 0 { flake.tintAmount = max(0, flake.tintAmount - dt * 1.3) }
-      let previousY = flake.position.y
-      flake.position += motion(of: flake) * dt
-
-      if flake.blown != 0 && (flake.position.x < -30 || flake.position.x > width + 30) {
-        removeFlake(i)
-        i -= 1
-        continue
-      }
-      if flake.position.x < -30 {
-        flake.position.x += width + 60
-      } else if flake.position.x > width + 30 {
-        flake.position.x -= width + 60
-      }
+      let previousY=flake.previousY
 
       if flake.settles && flake.blown == 0 {
         if flake.leaf > 0
@@ -1473,56 +1329,22 @@ final class SnowSimulation {
     return (cursor, speed > 500 ? cursorVelocity * (500 / speed) : cursorVelocity)
   }
 
-  private func stir(
-    _ velocity: inout SIMD2<Float>, at position: SIMD2<Float>,
-    in wake: (center: SIMD2<Float>, velocity: SIMD2<Float>), dt: Float
-  ) {
-    let radius: Float = 80
-    let distanceSquared = simd_length_squared(position - wake.center)
-    guard distanceSquared < radius * radius else { return }
-    let falloff = 1 - distanceSquared.squareRoot() / radius
-    velocity += (wake.velocity - velocity) * min(1, falloff * falloff * 4 * dt)
-  }
-
   private func advanceGrains(dt: Float) {
     guard !grains.isEmpty else { return }
-    let wake = cursorWake()
-    let damping = exp(-grainDrag * dt)
-    let airDrag = exp(-3.2 * dt)
-    let wind = breeze() + slideWind
-    let time = Float(clock.truncatingRemainder(dividingBy: 1000))
+    var context=snowStep(dt:dt)
+    grains.withUnsafeMutableBufferPointer { particles in
+      withFlow { cells,columns,rows,spacing,base in
+        sh_advance_snow_grains(particles.baseAddress,particles.count,&context,cells,columns,rows,spacing,base)
+      }
+    }
     var i = grains.count - 1
     while i >= 0 {
       var grain = grains[i]
-      if botanicalStyle == 3 && grain.seed > 2 && touchesDandelion(grain.position, size: grain.size) {
-        popDandelion(at: grain.position, velocity: grain.velocity, size: grain.size, area: grain.area)
-        removeGrain(i); i -= 1; continue
+      if grain.status == 2 {
+        popDandelion(at:grain.position,velocity:grain.velocity,size:grain.size,area:grain.area)
+        removeGrain(i);i-=1;continue
       }
-
-      let previousY = grain.position.y
-      if grain.blown {
-        // Light powder: the wind keeps it moving toward the edge it was blown to, and it barely sinks.
-        let speed = grain.velocity.x < 0 ? -gustWind * 1.6 : gustWind * 1.6
-        grain.velocity.x += (speed - grain.velocity.x) * min(1, dt * 2)
-        grain.velocity.y -= gravity * 0.08 * dt
-      } else if autumn {
-        // A leaf catches the air: flung up, it soon loses its speed and flutters down, swinging from side to side.
-        let phase = time * (1.2 + grain.seed) + grain.seed * 40
-        let fall = (35 + 30 * grain.seed) * (0.3 + 1.1 * abs(cos(phase)))
-        let local = airflow?.sample(grain.position) ?? SIMD2(weatherWind, 0)
-        let carried = wind - weatherWind + local.x
-        grain.velocity.x = (grain.velocity.x - carried) * airDrag + carried
-        grain.velocity.y += local.y * dt
-        grain.velocity.y = (grain.velocity.y + fall) * airDrag - fall
-        // Leaves falling off a window or swept out of a heap ride the cursor's wake as the falling ones do.
-        if let wake, !grain.bulk { stir(&grain.velocity, at: grain.position, in: wake, dt: dt) }
-        // As wide as a falling leaf's swing: tossed up, it glides off to one side and back as it comes down.
-        grain.position.x += cos(phase) * 60 * dt
-      } else {
-        grain.velocity.y -= gravity * dt
-        grain.velocity *= damping
-      }
-      grain.position += grain.velocity * dt
+      let previousY=grain.previousY
 
       if autumn && !grain.bulk && !grain.blown
         && surfaceDrift.catchMaterial(
@@ -1580,23 +1402,9 @@ final class SnowSimulation {
 
   private func advanceMotes(dt: Float) {
     guard !motes.isEmpty else { return }
-    let damping = exp(-3.2 * dt)
-    let drift = windSpeed() * 0.4
-    var i = motes.count - 1
-    while i >= 0 {
-      var mote = motes[i]
-      mote.age += dt
-      if mote.age >= mote.life {
-        motes.swapAt(i, motes.count - 1)
-        motes.removeLast()
-      } else {
-        mote.velocity.y -= 35 * dt
-        mote.velocity *= damping
-        mote.position += (mote.velocity + SIMD2(drift, 0)) * dt
-        motes[i] = mote
-      }
-      i -= 1
-    }
+    let wind=windSpeed()
+    let count=motes.withUnsafeMutableBufferPointer {sh_advance_snow_motes($0.baseAddress,$0.count,dt,wind)}
+    if count<motes.count {motes.removeLast(motes.count-count)}
   }
 
   /// Turns the pieces into snowflakes that drift down and fade to white; together they leave a small drift.
@@ -1729,9 +1537,7 @@ final class SnowSimulation {
   }
 
   private func breeze() -> Float {
-    let t = clock
-    let breeze = Float(10 * sin(t * 0.07) + 6 * sin(t * 0.19 + 1.7) + 3 * sin(t * 0.43 + 4.1))
-    return breeze * (0.6 + 0.4 * strength) + weatherWind
+    sh_snow_breeze(clock,strength,weatherWind)
   }
 
   private func gustSpeed() -> Float {
@@ -1863,23 +1669,13 @@ final class SnowSimulation {
       }
     }
     for layer in layers {
-      var dust: Float = 0
-      for i in 0..<layer.count {
-        let height = layer.heights[i]
-        guard height > 0 else { continue }
-        let x = layer.centerX(i)
-        guard gust.calm || (front - x) * gust.direction > 0 else { continue }
-        let surface = layer.surface(i)
-        let loss =
-          finish ? height : min(height, (gust.calm ? height * 2.5 + 6 : height * 8 + 50) * dt)
-        layer.set(i, height - loss)
-        heightsChanged = true
-        guard !gust.calm, layer.visible[i] else { continue }
-        dust += loss * layer.columnWidth
-        while dust >= 3.5 {
-          lift(at: SIMD2(x, surface), direction: gust.direction)
-          dust -= 3.5
-        }
+      let count=layer.erode(dt:dt,front:front,direction:gust.direction,mode:gust.calm ? 0:1,
+        finish:finish,share:0,cuts:&cursorCuts)
+      if count>0 {heightsChanged=true}
+      var dust:Float=0
+      for i in 0..<count {
+        let cut=cursorCuts[i];dust+=cut.area
+        while dust>=3.5 {lift(at:SIMD2(cut.x,cut.surface),direction:gust.direction);dust-=3.5}
       }
     }
   }
@@ -1903,20 +1699,12 @@ final class SnowSimulation {
       return
     }
     for layer in layers {
-      let count = layer.count
-      var dust: Float = 0
-      for i in 0..<count where layer.visible[i] {
-        let height = layer.heights[i]
-        guard height > 1.5 else { continue }
-        let around = (layer.heights[max(i - 12, 0)] + layer.heights[min(i + 12, count - 1)]) / 2
-        let loss = min(height * 0.2, (0.2 + max(0, height - around) * 1.5) * share * dt)
-        layer.set(i, height - loss)
-        heightsChanged = true
-        dust += loss * layer.columnWidth
-        while dust >= 1.5 {
-          puff(at: SIMD2(layer.centerX(i), layer.surface(i)), area: 1.5)
-          dust -= 1.5
-        }
+      let count=layer.erode(dt:dt,front:0,direction:0,mode:2,finish:false,share:share,cuts:&cursorCuts)
+      if count>0 {heightsChanged=true}
+      var dust:Float=0
+      for i in 0..<count {
+        let cut=cursorCuts[i];dust+=cut.area
+        while dust>=1.5 {puff(at:SIMD2(cut.x,cut.surface),area:1.5);dust-=1.5}
       }
     }
   }
@@ -1987,10 +1775,7 @@ final class SnowSimulation {
   /// How a flake actually moves: carried along, swaying from side to side, and for a leaf, swinging like a
   /// pendulum, dropping fastest through the middle of each swing.
   private func motion(of flake: Flake) -> SIMD2<Float> {
-    let sway = (cos(flake.phase) + 0.3 * cos(flake.phase * 2.3)) * flake.swayAmount
-    let flutter =
-      flake.leaf > 0 ? 0.3 + 1.1 * abs(cos(flake.phase)) : 1 + 0.12 * sin(flake.phase * 1.3)
-    return SIMD2(flake.velocity.x + sway, flake.velocity.y * flutter)
+    flake.renderVelocity
   }
 
   private func tumbleSpeed(_ seed: Float) -> Float {
@@ -2107,7 +1892,6 @@ final class SnowSimulation {
     let shown = Set(layers.map(ObjectIdentifier.init))
     let kept = Set(
       dormant.values.map(ObjectIdentifier.init) + parking.map { ObjectIdentifier($0.ledge) })
-    let speed = simd_length(cursorVelocity)
     for k in lying.indices.reversed() {
       var leaf = lying[k]
       let leafPoint = SIMD2(leaf.layer.heapX + leaf.x, leaf.layer.base.y + leaf.rest)
@@ -2136,57 +1920,22 @@ final class SnowSimulation {
           lying.remove(at:k);continue
         }
       }
-      let surface = layer.surface(i) - layer.base.y
-      let point = SIMD2(x, layer.base.y + leaf.rest)
-      if let cursor, speed > 8, simd_length(point - cursor) < cursorRadius + leaf.size * 0.4 {
-        fly(k, velocity: swept(by: cursorVelocity))
-        lastCursorPush = clock
-        continue
-      }
-      // Shaken, the leaves on top go as often as the columns of the heap under them do.
-      if random.next() < leafShakeRate(layer.agitation) * 2 * dt {
-        fly(
-          k,
-          velocity: layer.trackVelocity + layer.offsetVelocity
-            + SIMD2(random.range(-80, 80), random.range(20, 80)))
-        continue
-      }
-      if surface < leaf.rest - 3 {
-        // It goes the way the heap under it went, not the window.
-        let carried = layer.trackVelocity + layer.offsetVelocity
-        let tossed =
-          layer.agitation > leafShaking
-          ? SIMD2(random.range(-40, 40), random.range(20, 80)) : SIMD2(random.range(-15, 15), 0)
-        fly(k, velocity: carried + tossed)
-        continue
-      }
-      // Deep in a heap a leaf is hidden by the ones above it and the mass drawn under them.
-      let buried = surface > leaf.top + 10
-      if surface < leaf.top {
-        let sink = min(leaf.top - surface, 20 * dt)
-        leaf.top -= sink
-        leaf.rest -= sink
-        heightsChanged = true
-      }
-      if leaf.settled < 1 {
-        leaf.settled = min(1, leaf.settled + dt / leaf.settling)
-        heightsChanged = true
-      }
-      if buried {
-        leaf.fade -= dt * 2
-        heightsChanged = true
-      } else if thaws || retiring || botanicalStyle == 5 {
-        leaf.age += dt * retirementRate
-        if leaf.age > leaf.life {
-          leaf.fade -= dt * retirementRate / 4
-          heightsChanged = true
-        }
-      }
-      if leaf.fade <= 0 {
-        lying.remove(at: k)
+      let carried=layer.trackVelocity+layer.offsetVelocity
+      var input=SHRestingStep(dt:dt,pointX:x,pointY:layer.base.y+leaf.rest,
+        surface:layer.surface(i)-layer.base.y,agitation:layer.agitation,leafShaking:leafShaking,
+        retirementRate:retirementRate,cursorX:cursor?.x ?? 0,cursorY:cursor?.y ?? 0,
+        cursorVX:cursorVelocity.x,cursorVY:cursorVelocity.y,cursorRadius:cursorRadius,
+        carriedVX:carried.x,carriedVY:carried.y,outputVX:0,outputVY:0,
+        flags:(cursor != nil ? 1:0)|((thaws || retiring || botanicalStyle == 5) ? 2:0))
+      let result=random.withState {sh_tend_resting_leaf(&leaf.state,&input,&$0)}
+      if result & 1 != 0 {
+        fly(k,velocity:SIMD2(input.outputVX,input.outputVY))
+        if result & 2 != 0 {lastCursorPush=clock}
       } else {
-        lying[k] = leaf
+        if result & 4 != 0 {heightsChanged=true}
+        if result & 8 != 0 {lying.remove(at:k)} else {lying[k]=leaf}
       }
+
     }
   }
 
@@ -2246,20 +1995,6 @@ final class SnowSimulation {
   private static func columnCount(for width: Float, columnWidth: Float) -> Int {
     Int((width / columnWidth).rounded(.up)) + 1
   }
-}
-
-/// Critically damped follow of `target` (the SmoothDamp approximation), stable at any time step.
-private func smoothDamp(
-  _ current: inout SIMD2<Float>, _ velocity: inout SIMD2<Float>, toward target: SIMD2<Float>,
-  time: Float, dt: Float
-) {
-  let omega = 2 / time
-  let x = omega * dt
-  let decay = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x)
-  let change = current - target
-  let temp = (velocity + omega * change) * dt
-  velocity = (velocity - omega * temp) * decay
-  current = target + (change + temp) * decay
 }
 
 private func smoothstep(_ edge0: Float, _ edge1: Float, _ x: Float) -> Float {

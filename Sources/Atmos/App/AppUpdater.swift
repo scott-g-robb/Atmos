@@ -10,45 +10,81 @@ final class AppUpdater {
   private var automaticTimer:Timer?
   private var automaticActive=false
   private var automaticEnabled=false
+  private var checking=false
+  private let service:GitHubUpdates
+  private let defaults:UserDefaults
+  private let currentVersion:AppVersion?
+  private let now:()->Date
+  private let automaticInstaller:((GitHubRelease)->Void)?
+  private let canInstallAutomatically:()->Bool
+  private(set) var lastCheckedAt:Date?
+  private var latestCheckedVersion:AppVersion?
+  private var checkFailed=false
+  var updateAvailable:Bool {
+    guard let latestCheckedVersion,let currentVersion else {return false}
+    return latestCheckedVersion>currentVersion
+  }
+  var checkStatus:String {
+    if checking {return "Checking…"}
+    if checkFailed {return "Couldn't check"}
+    if updateAvailable {return "Update available"}
+    return latestCheckedVersion == nil ? "Not checked yet":"Up-To-Date"
+  }
+  init(service:GitHubUpdates=GitHubUpdates(),defaults:UserDefaults = .standard,
+    currentVersion:AppVersion?=AppVersion(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""),
+    now:@escaping()->Date={Date()},automaticInstaller:((GitHubRelease)->Void)?=nil,
+    canInstallAutomatically:@escaping()->Bool={FileManager.default.isWritableFile(atPath:Bundle.main.bundleURL.deletingLastPathComponent().path)}) {
+    self.service=service;self.defaults=defaults;self.currentVersion=currentVersion
+    self.now=now;self.automaticInstaller=automaticInstaller
+    self.canInstallAutomatically=canInstallAutomatically
+    if let date=defaults.object(forKey:"lastUpdateCheck") as? Date {lastCheckedAt=date}
+    latestCheckedVersion=defaults.string(forKey:"latestCheckedUpdateVersion").flatMap(AppVersion.init)
+    checkFailed=defaults.bool(forKey:"lastUpdateCheckFailed")
+  }
+  deinit {automaticTimer?.invalidate();task?.cancel()}
 
   func setAutomaticActivity(enabled:Bool,active:Bool) {
     automaticEnabled=enabled;automaticActive=active
-    guard enabled && active else {
+    guard active,currentVersion != nil else {
       automaticTimer?.invalidate();automaticTimer=nil
-      if automaticTask && !installing {generation+=1;task?.cancel();task=nil;automaticTask=false}
+      if automaticTask && !installing {cancelBackgroundTask()}
       return
     }
+    // Disabling installation must not cancel a discovery request. An uncommitted
+    // silent download can be cancelled; the installed app remains untouched.
+    if !enabled && automaticTask && !checking && !installing {cancelBackgroundTask()}
     guard automaticTimer==nil else {return}
-    let last=UserDefaults.standard.double(forKey:"lastAutomaticUpdateCheck")
-    let due=max(Date().timeIntervalSince1970+1,last+7200)
+    let last=max(lastCheckedAt?.timeIntervalSince1970 ?? 0,defaults.double(forKey:"lastAutomaticUpdateCheck"))
+    let due=max(now().timeIntervalSince1970+1,last+7200)
     let timer=Timer(fire:Date(timeIntervalSince1970:due),interval:7200,repeats:true) { [weak self] _ in self?.checkAutomatically() }
-    timer.tolerance=120;RunLoop.main.add(timer,forMode:.common);automaticTimer=timer
+    timer.tolerance=min(120,max(0,due-now().timeIntervalSince1970)*0.1)
+    RunLoop.main.add(timer,forMode:.common);automaticTimer=timer
   }
-  private func checkAutomatically() {
-    guard automaticEnabled && automaticActive,task==nil,
-      FileManager.default.isWritableFile(atPath:Bundle.main.bundleURL.deletingLastPathComponent().path) else {return}
-    generation+=1;let token=generation;automaticTask=true
-    UserDefaults.standard.set(Date().timeIntervalSince1970,forKey:"lastAutomaticUpdateCheck")
+  func checkAutomatically() {
+    guard automaticActive,task==nil else {return}
+    generation+=1;let token=generation;automaticTask=true;checking=true
+    defaults.set(now().timeIntervalSince1970,forKey:"lastAutomaticUpdateCheck")
+    changed()
     task=Task { @MainActor [weak self] in
       guard let self else {return}
       do {
         let release=try await service.latest()
         try Task.checkCancellation()
-        guard generation==token,automaticEnabled,automaticActive else {return}
+        guard generation==token,automaticActive else {return}
         task=nil;automaticTask=false
-        if let latest=release.version,let current=AppVersion(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""),latest>current {
-          download(release,automatic:true)
+        try record(release)
+        if updateAvailable,automaticEnabled,canInstallAutomatically() {
+          if let automaticInstaller {automaticInstaller(release)} else {download(release,automatic:true)}
         }
-      } catch {if generation==token {task=nil;automaticTask=false}}
+      } catch {if generation==token {task=nil;automaticTask=false;recordFailure()}}
     }
   }
 
   private(set) var menuTitle="Check for Updates…"
-  private let service=GitHubUpdates()
 
   func check() {
     if task != nil && automaticTask && !installing {
-      generation+=1;task?.cancel();task=nil;automaticTask=false
+      cancelBackgroundTask()
     }
     if task != nil {
       if automaticTask {
@@ -64,12 +100,15 @@ final class AppUpdater {
     panel.show(title:"Checking for updates…",detail:"Looking for the latest Atmos on GitHub.",primary:"",secondary:"Cancel",working:true)
     panel.secondaryAction={ [weak self] in self?.cancel() }
     setTitle("Checking for Updates…")
+    checking=true;changed()
     task=Task { @MainActor [weak self, panel] in
       guard let self else {return}
       do {
         let release=try await service.latest()
         try Task.checkCancellation()
-        guard let latest=release.version,let current=AppVersion(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") else {throw UpdateError.invalidRelease}
+        guard generation==token else {return}
+        guard let latest=release.version,let current=currentVersion else {throw UpdateError.invalidRelease}
+        try record(release)
         task=nil;setTitle("Check for Updates…")
         if latest>current {
           _=try release.installer()
@@ -79,7 +118,7 @@ final class AppUpdater {
           panel.show(title:"Atmos is up to date.",detail:"You're using Atmos \(current).",primary:"Done")
           panel.primaryAction={ [weak self] in self?.cancel() }
         }
-      } catch {if generation==token {finish(error)}}
+      } catch {if generation==token {recordFailure();finish(error)}}
     }
   }
   private func download(_ release:GitHubRelease,automatic:Bool=false) {
@@ -137,7 +176,7 @@ final class AppUpdater {
   private func cancel() {
     guard !installing else {return}
     generation+=1
-    task?.cancel();task=nil
+    task?.cancel();task=nil;checking=false;automaticTask=false
     panel?.close();panel=nil;setTitle("Check for Updates…")
   }
   private func finish(_ error:Error) {
@@ -151,4 +190,31 @@ final class AppUpdater {
     panel.secondaryAction={ [weak self] in self?.cancel() }
   }
   private func setTitle(_ title:String){menuTitle=title;changed()}
+
+  private func record(_ release:GitHubRelease) throws {
+    guard let latest=release.version,let currentVersion else {throw UpdateError.invalidRelease}
+    if latest>currentVersion {_=try release.installer()}
+    latestCheckedVersion=latest;lastCheckedAt=now();checkFailed=false;checking=false
+    defaults.set(lastCheckedAt,forKey:"lastUpdateCheck")
+    defaults.set(latest.description,forKey:"latestCheckedUpdateVersion")
+    defaults.set(false,forKey:"lastUpdateCheckFailed")
+    reschedule();changed()
+  }
+  private func recordFailure() {
+    checking=false;checkFailed=true;lastCheckedAt=now()
+    defaults.set(lastCheckedAt,forKey:"lastUpdateCheck")
+    defaults.set(true,forKey:"lastUpdateCheckFailed")
+    reschedule();changed()
+  }
+  private func reschedule() {
+    automaticTimer?.invalidate();automaticTimer=nil
+    setAutomaticActivity(enabled:automaticEnabled,active:automaticActive)
+  }
+  private func cancelBackgroundTask() {
+    generation+=1;task?.cancel();task=nil;automaticTask=false;checking=false;changed()
+  }
+  func stop() {
+    automaticTimer?.invalidate();automaticTimer=nil;automaticActive=false
+    if !installing {generation+=1;task?.cancel();task=nil;automaticTask=false;checking=false}
+  }
 }

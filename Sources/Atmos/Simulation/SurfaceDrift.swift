@@ -1,3 +1,4 @@
+import CWeatherCore
 import CoreGraphics
 import Foundation
 import simd
@@ -12,19 +13,7 @@ final class SurfaceDrift {
     var seed: Float
     var area: Float
   }
-  private struct Floating {
-    var surfaceID: CGWindowID
-    var x: Float
-    var position: SIMD2<Float>
-    var velocity: Float
-    var size: Float
-    var seed: Float
-    var area: Float
-    var turn: Float
-    var age: Float = 0
-    var alpha: Float = 1
-    var belowDock: Bool
-  }
+  private typealias Floating = SHFloating
   var botanicalStyle:Float=1
   private func clearance(size:Float,turn:Float)->Float {size*0.055}
   var lifetime: Float = 90
@@ -49,10 +38,9 @@ final class SurfaceDrift {
     guard let hit else { return false }
     floating.append(
       Floating(
-        surfaceID: hit.id, x: x - hit.origin.x,
-        position: SIMD2(x, hit.origin.y + hit.depth(at: x)+clearance(size:size,turn:turn)), velocity: velocity.x * 0.16,
+        position: SIMD2(x, hit.origin.y + hit.depth(at: x)+clearance(size:size,turn:turn)), releaseVelocity:.zero,surfaceID:hit.id,x:x-hit.origin.x,velocity: velocity.x * 0.16,
         size: size, seed: seed, area: area, turn: atan2(sin(turn), cos(turn)),
-        belowDock: hit.belowDock))
+        age:0,alpha:1,belowDock:hit.belowDock ? 1:0,status:0))
     hit.hit(x: x, amount: 0, impulse: min(1.4, max(0.25, abs(velocity.y) * 0.008)))
     rebuildSprites()
     return true
@@ -63,75 +51,33 @@ final class SurfaceDrift {
     cursorVelocity: SIMD2<Float>, retiring: Bool, clearing: Bool,
     cursorFrom: SIMD2<Float>? = nil
   ) -> [Released] {
-    var released: [Released] = []
-    for i in floating.indices.reversed() {
-      var item = floating[i]
-      guard let surface = water.first(where: { $0.id == item.surfaceID }) else {
-        released.append(release(item))
-        floating.remove(at: i)
-        continue
+    var released:[Released]=[]
+    var input=SHDriftStep(dt:dt,wind:wind,cursorX:cursor?.x ?? 0,cursorY:cursor?.y ?? 0,
+      previousX:(cursorFrom ?? cursor)?.x ?? 0,previousY:(cursorFrom ?? cursor)?.y ?? 0,
+      cursorVX:cursorVelocity.x,cursorVY:cursorVelocity.y,lifetime:lifetime,
+      flags:(cursor != nil ? 1:0)|(retiring ? 2:0)|(clearing ? 4:0))
+    floating.withUnsafeMutableBufferPointer { items in
+      sh_drift_begin(items.baseAddress,items.count)
+      for surface in water {
+        surface.withPhysicsField { view in sh_drift_surface(items.baseAddress,items.count,&view,&input) }
       }
-      let x = surface.origin.x + item.x
-      let depth = surface.depth(at: x)
-      let liquid=surface.velocity(at:x)
-      if liquid.y>45 {
-        var airborne=release(item)
-        airborne.position=SIMD2(x,surface.origin.y+depth+1)
-        airborne.velocity=liquid
-        released.append(airborne);floating.remove(at:i);continue
-      }
-      guard depth > 0.16, surface.accepts(x: x) else {
-        item.position.x = x
-        released.append(release(item))
-        floating.remove(at: i)
-        continue
-      }
-      if let cursor, simd_length(cursorVelocity)>100 {
-        let start=cursorFrom ?? cursor,stroke=cursor-(cursorFrom ?? cursor)
-        let t=max(0,min(1,simd_dot(item.position-start,stroke)/max(0.001,simd_length_squared(stroke))))
-        let contact=simd_length_squared(stroke)<160_000 ? start+stroke*t : cursor
-        var normal=item.position-contact
-        var distance=simd_length(normal)
-        if distance<0.001 { normal=cursorVelocity/max(1,simd_length(cursorVelocity));distance=1 }
-        if distance<11+item.size*0.3 && distance>0.001 {
-          normal/=distance
-          let impulse=normal*max(0,simd_dot(cursorVelocity,normal))
-          var airborne=release(item);airborne.velocity=liquid+impulse
-          released.append(airborne);floating.remove(at:i);continue
-        }
-      }
-      item.age += dt
-      let current = surface.current(at: x) + wind * 0.025
-      item.velocity += (current - item.velocity) * (1 - exp(-dt * 2.8))
-      item.x += item.velocity * dt
-      let worldX = surface.origin.x + item.x
-      let targetTurn: Float = cos(item.turn) < 0 ? (item.turn < 0 ? -.pi : .pi) : 0
-      let rippleTurn = (surface.depth(at: worldX + 3) - surface.depth(at: worldX - 3)) * 0.04
-      item.turn +=
-        (targetTurn + rippleTurn + sin(item.age * 0.7 + item.seed * 17) * 0.08 - item.turn)
-        * min(1, dt * 3)
-      item.position = SIMD2(
-        worldX, surface.origin.y + surface.depth(at: worldX) + clearance(size:item.size,turn:item.turn))
-      if retiring || clearing || item.age > lifetime {
-        item.alpha = max(0, item.alpha - dt * (clearing ? 2 : 0.7))
-      }
-      if item.alpha <= 0 { floating.remove(at: i) } else { floating[i] = item }
+    }
+    for i in floating.indices.reversed() where floating[i].status != 0 {
+      let item=floating[i]
+      if item.status == 1 {released.append(Released(position:item.position+SIMD2(0,1),
+        velocity:item.releaseVelocity,size:item.size,seed:item.seed,area:item.area))}
+      floating.remove(at:i)
     }
     rebuildSprites()
     return released
   }
 
-  private func release(_ item: Floating) -> Released {
-    Released(
-      position: item.position + SIMD2(0, 1), velocity: SIMD2(item.velocity, -12),
-      size: item.size, seed: item.seed, area: item.area)
-  }
   private func rebuildSprites() {
     sprites.removeAll(keepingCapacity: true)
     groundCount = 0
     groundTop = 0
     for belowDock in [true, false] {
-      for item in floating where item.belowDock == belowDock {
+      for item in floating where (item.belowDock != 0) == belowDock {
         sprites.append(
           Sprite(
             position: item.position, velocity: SIMD2(item.velocity, 0),

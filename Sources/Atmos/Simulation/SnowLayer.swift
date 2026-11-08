@@ -1,3 +1,4 @@
+import CWeatherCore
 import Foundation
 import simd
 
@@ -111,23 +112,12 @@ final class SnowLayer {
   /// Moves the snow one column along its support and returns the column that slid off the end.
   func slideColumn(toward direction: Int) -> (height: Float, x: Float, y: Float) {
     releaseSupport()
-    if direction > 0 {
-      let last = heights.count - 1
-      let x = centerX(last)
-      let y = floor(last)
-      let dropped = heights.removeLast()
-      heights.insert(0, at: 0)
-      packed.removeLast()
-      packed.insert(0, at: 0)
-      return (dropped, x, y)
+    let edge=direction>0 ? count-1:0,x=centerX(direction>0 ? count-1:0)
+    let y=floor(edge),n=count
+    let dropped=heights.withUnsafeMutableBufferPointer { h in
+      packed.withUnsafeMutableBufferPointer { p in sh_snow_slide(h.baseAddress,p.baseAddress,n,Int32(direction)) }
     }
-    let x = centerX(0)
-    let y = floor(0)
-    let dropped = heights.removeFirst()
-    heights.append(0)
-    packed.removeFirst()
-    packed.append(0)
-    return (dropped, x, y)
+    return (dropped,x,y)
   }
 
   func fill(_ i: Int) -> Float {
@@ -157,12 +147,13 @@ final class SnowLayer {
   }
 
   func updateVisibility(screenWidth: Float, blockers: [SIMD4<Float>]) {
-    for i in heights.indices {
-      let x = centerX(i)
-      let y = origin.y + bed[i] + 1
-      visible[i] =
-        x >= 0 && x <= screenWidth
-        && !blockers.contains { x >= $0.x && x < $0.z && y >= $0.y && y < $0.w }
+    let n=count,x=base.x,y=origin.y,cw=columnWidth
+    visible.withUnsafeMutableBytes { v in
+      bed.withUnsafeBufferPointer { b in
+        blockers.withUnsafeBufferPointer { blockers in
+          sh_snow_visible(v.baseAddress?.assumingMemoryBound(to:UInt8.self),b.baseAddress,n,x,y,cw,screenWidth,blockers.baseAddress,blockers.count)
+        }
+      }
     }
   }
 
@@ -173,60 +164,60 @@ final class SnowLayer {
   /// Adds snow centred on `x` and returns the area that fell outside the layer.
   @discardableResult
   func deposit(_ area: Float, at x: Float, wide: Bool) -> Float {
-    guard area > 0 else { return 0 }
-    let center = Int(((x - base.x) / columnWidth).rounded(.down))
-    let amount = area / columnWidth
-    let kernel: [(Int, Float)] =
-      wide
-      ? [(-2, 0.0625), (-1, 0.25), (0, 0.375), (1, 0.25), (2, 0.0625)]
-      : [(-1, 0.25), (0, 0.5), (1, 0.25)]
-    var missed: Float = 0
-    for (offset, weight) in kernel {
-      let i = center + offset
-      if i >= 0 && i < heights.count {
-        heights[i] += amount * weight
-      } else {
-        missed += area * weight
-      }
+    let n=count,x0=base.x,cw=columnWidth
+    return heights.withUnsafeMutableBufferPointer { h in
+      sh_snow_deposit(h.baseAddress,n,x0,cw,area,x,wide ? 1:0)
     }
-    return missed
   }
 
   /// Piles snow against a wall just past column `edge`, as a plough heaps it: a wedge falling away from the wall
   /// at `slope` per column, the way `inward` points.
   func heap(_ area: Float, against edge: Int, inward: Int, slope: Float) {
-    let amount = area / columnWidth
-    guard amount > 0 else { return }
-    var low = bed[edge] + heights[edge]
-    var high = low + amount
-    for _ in 0..<20 {
-      let middle = (low + high) / 2
-      if wedge(middle, edge: edge, inward: inward, slope: slope, scale: 0) < amount {
-        low = middle
-      } else {
-        high = middle
+    let n=count,cw=columnWidth,bd=bedDepth
+    heights.withUnsafeMutableBufferPointer { h in
+      packed.withUnsafeMutableBufferPointer { p in
+        bed.withUnsafeBufferPointer { b in sh_snow_heap(h.baseAddress,p.baseAddress,b.baseAddress,n,cw,bd,area,edge,Int32(inward),slope) }
       }
     }
-    let total = wedge(high, edge: edge, inward: inward, slope: slope, scale: 0)
-    wedge(high, edge: edge, inward: inward, slope: slope, scale: amount / total)
   }
 
-  /// The snow it takes to raise the surface to a line falling away from `level` at `edge`; adds `scale` of it.
-  @discardableResult
-  private func wedge(_ level: Float, edge: Int, inward: Int, slope: Float, scale: Float) -> Float {
-    let reach = inward > 0 ? heights.count - edge : edge + 1
-    var total: Float = 0
-    for k in 0..<reach {
-      let line = level - slope * Float(k)
-      guard line > -bedDepth else { break }
-      let i = edge + inward * k
-      let gap = line - (bed[i] + heights[i])
-      guard gap > 0 else { continue }
-      total += gap
-      heights[i] += gap * scale
-      packed[i] += gap * scale
+  /// Displace a cursor's swept volume in one allocation-free Rust batch.
+  func carve(center:SIMD2<Float>,velocity:SIMD2<Float>,radius:Float,travel:Float,
+    final:Bool,autumn:Bool,leafCover:Float,cuts:inout [SHSnowCut]) -> Int {
+    if cuts.count < count {cuts=Array(repeating:SHSnowCut(),count:count)}
+    let n=count,base=base,cw=columnWidth
+    return heights.withUnsafeMutableBufferPointer { h in
+      packed.withUnsafeMutableBufferPointer { p in
+        bed.withUnsafeBufferPointer { b in
+          visible.withUnsafeBytes { v in
+            cuts.withUnsafeMutableBufferPointer { out in
+              sh_snow_carve(h.baseAddress,p.baseAddress,b.baseAddress,
+                v.baseAddress?.assumingMemoryBound(to:UInt8.self),n,base.x,base.y,cw,
+                center.x,center.y,radius,velocity.x,velocity.y,travel,final ? 1:0,
+                autumn ? 1:0,leafCover,out.baseAddress)
+            }
+          }
+        }
+      }
     }
-    return total
+  }
+
+  func erode(dt:Float,front:Float,direction:Float,mode:UInt32,finish:Bool,share:Float,
+    cuts:inout [SHSnowCut])->Int {
+    if cuts.count<count {cuts=Array(repeating:SHSnowCut(),count:count)}
+    let n=count,base=base,cw=columnWidth
+    return heights.withUnsafeMutableBufferPointer { h in
+      packed.withUnsafeMutableBufferPointer { p in
+        bed.withUnsafeBufferPointer { b in
+          visible.withUnsafeBytes { v in
+            cuts.withUnsafeMutableBufferPointer { out in
+              sh_snow_erode(h.baseAddress,p.baseAddress,b.baseAddress,v.baseAddress?.assumingMemoryBound(to:UInt8.self),
+                n,base.x,base.y,cw,dt,front,direction,mode,finish ? 1:0,share,out.baseAddress)
+            }
+          }
+        }
+      }
+    }
   }
 
   func isHeld(_ i: Int) -> Bool {
@@ -252,133 +243,48 @@ final class SnowLayer {
   /// Slumps slopes steeper than the angle of repose and rounds crests, measured on the snow surface over the bed,
   /// so snow slides off rounded corners. Open layers shed what slides past their ends into `spill`.
   func relax(repose: Float, rounding: Float) -> Bool {
-    let count = heights.count
-    guard count > 1, top > 0 else { return false }
-    let limit = repose * columnWidth
-    let forwardFirst = parity
-    parity.toggle()
-    var moved = false
-    var spilledLeft: Float = 0
-    var spilledRight: Float = 0
-    let open = opensAtEdges
-    let outside = self.outside
-
-    heights.withUnsafeMutableBufferPointer { h in
+    let n=count
+    guard n>1,top>0 else {return false}
+    let forward=parity;parity.toggle()
+    let limit=repose*columnWidth,open=opensAtEdges,edges=outside
+    let result=heights.withUnsafeMutableBufferPointer { h in
       packed.withUnsafeMutableBufferPointer { p in
         bed.withUnsafeBufferPointer { b in
-          supported.withUnsafeBufferPointer { held in
-            // Moves snow between columns, packed snow in proportion.
-            func shift(_ amount: Float, from a: Int, to c: Int) {
-              let share = h[a] > 0 ? min(p[a], amount * p[a] / h[a]) : 0
-              h[a] -= amount
-              h[c] += amount
-              p[a] -= share
-              p[c] += share
-            }
-            for pass in 0..<6 {
-              let forward = (pass % 2 == 0) == forwardFirst
-              for k in 0..<(count - 1) {
-                let i = forward ? k : count - 2 - k
-                if held[i] || held[i + 1] { continue }
-                let difference = (b[i] + h[i]) - (b[i + 1] + h[i + 1])
-                if difference > limit + 0.01 {
-                  let transfer = min((difference - limit) * 0.5, h[i])
-                  shift(transfer, from: i, to: i + 1)
-                  if transfer > 0 { moved = true }
-                } else if difference < -limit - 0.01 {
-                  let transfer = min((-difference - limit) * 0.5, h[i + 1])
-                  shift(transfer, from: i + 1, to: i)
-                  if transfer > 0 { moved = true }
-                }
-              }
-              if open {
-                if !held[0] && h[0] - outside.left > limit + 0.01 {
-                  let transfer = (h[0] - outside.left - limit) * 0.5
-                  h[0] -= transfer
-                  p[0] = min(p[0], h[0])
-                  spilledLeft += transfer
-                  moved = true
-                }
-                if !held[count - 1] && h[count - 1] - outside.right > limit + 0.01 {
-                  let transfer = (h[count - 1] - outside.right - limit) * 0.5
-                  h[count - 1] -= transfer
-                  p[count - 1] = min(p[count - 1], h[count - 1])
-                  spilledRight += transfer
-                  moved = true
-                }
-              }
-            }
-            // Pulls each slope toward its neighbours' average: rounds crests and notches, leaves even slopes alone.
-            for i in 1..<max(1, count - 2)
-            where !(held[i - 1] || held[i] || held[i + 1] || held[i + 2]) {
-              let s0 = b[i - 1] + h[i - 1]
-              let s1 = b[i] + h[i]
-              let s2 = b[i + 1] + h[i + 1]
-              let s3 = b[i + 2] + h[i + 2]
-              let kink = (s1 - s2) - 0.5 * ((s0 - s1) + (s2 - s3))
-              guard abs(kink) > 0.02 else { continue }
-              let transfer = kink > 0 ? min(kink * rounding, h[i]) : max(kink * rounding, -h[i + 1])
-              if transfer > 0 {
-                shift(transfer, from: i, to: i + 1)
-              } else {
-                shift(-transfer, from: i + 1, to: i)
-              }
-              if abs(transfer) > 0.003 { moved = true }
-            }
+          supported.withUnsafeBytes { held in
+            sh_snow_relax(h.baseAddress,p.baseAddress,b.baseAddress,held.baseAddress?.assumingMemoryBound(to:UInt8.self),n,limit,rounding,forward ? 1:0,open ? 1:0,edges.left,edges.right)
           }
         }
       }
     }
-    spill.left += spilledLeft * columnWidth
-    spill.right += spilledRight * columnWidth
-    return moved
+    spill.left+=result.left*columnWidth;spill.right+=result.right*columnWidth
+    return result.moved != 0
   }
 
   /// Snow down to `floor` melts slowly; anything heaped above it settles back down over `settle` seconds.
   func thaw(dt: Float, down floor: Float, rate: Float, settle: Float) -> Bool {
-    guard top > 0 else { return false }
-    var fastest: Float = 0
-    for i in heights.indices where heights[i] > 0 {
-      let h = heights[i]
-      let loss = min(h, (rate + max(0, h - floor) / settle) * dt)
-      heights[i] = h - loss
-      packed[i] = min(packed[i], heights[i])
-      fastest = max(fastest, loss)
+    guard top>0 else {return false}
+    let n=count
+    let fastest=heights.withUnsafeMutableBufferPointer { h in
+      packed.withUnsafeMutableBufferPointer { p in sh_snow_thaw(h.baseAddress,p.baseAddress,n,dt,floor,rate,settle) }
     }
-    // Sub-pixel melting is picked up by the idle glint refresh instead of forcing full-rate frames.
-    return fastest > 0.01
+    return fastest>0.01
   }
 
   /// Writes the smoothed snow surface for each column, then the bed under it.
   func writeSmoothed(into buffer: UnsafeMutablePointer<Float>) {
-    let count = heights.count
-    for i in 0..<count {
-      let left = heights[max(i - 1, 0)]
-      let right = heights[min(i + 1, count - 1)]
-      buffer[i] = bed[i] + 0.25 * left + 0.5 * heights[i] + 0.25 * right
-      buffer[count + i] = bed[i]
-    }
+    let n=count
+    heights.withUnsafeBufferPointer { h in bed.withUnsafeBufferPointer { b in sh_snow_smooth(h.baseAddress,b.baseAddress,n,buffer) } }
   }
 
   private func updateBed() {
-    let radius = corner.radius
-    let span = width
-    bed = (0..<heights.count).map { i in
-      guard radius > 0 else { return 0 }
-      let x = (Float(i) + 0.5) * columnWidth
-      let inset = min(x, span - x)
-      guard inset < radius else { return 0 }
-      let u = 1 - inset / radius
-      return -radius * (1 - pow(max(0, 1 - pow(u, corner.exponent)), 1 / corner.exponent))
-    }
-    bedDepth = -(bed.min() ?? 0)
+    if bed.count != count { bed = Array(repeating:0,count:count) }
+    let n=count,cw=columnWidth,r=corner.radius,e=corner.exponent
+    bedDepth=bed.withUnsafeMutableBufferPointer { b in sh_snow_bed(b.baseAddress,n,cw,r,e) }
   }
 
   private func updateCapacity() {
-    capacity = (0..<heights.count).map { i in
-      let x = Float(i) * columnWidth
-      let drift = 0.12 * sin(x * 0.0105 + phases.0) + 0.07 * sin(x * 0.037 + phases.1)
-      return depth * (0.95 + drift)
-    }
+    capacity=Array(repeating:0,count:count)
+    let n=count,cw=columnWidth,depth=self.depth,phases=self.phases
+    capacity.withUnsafeMutableBufferPointer { c in sh_snow_capacity(c.baseAddress,n,cw,depth,phases.0,phases.1) }
   }
 }
