@@ -29,7 +29,7 @@ for scale in [1, 2] {
     (string as NSString).draw(at: CGPoint(x: (600 - size.width) / 2, y: y), withAttributes: attrs)
   }
   text(
-    "Atmos", y: 307, font: .systemFont(ofSize: 28, weight: .semibold),
+    "Aeolian", y: 307, font: .systemFont(ofSize: 28, weight: .semibold),
     color: NSColor(srgbRed: 0.16, green: 0.23, blue: 0.32, alpha: 1))
   text(
     "A little atmosphere on your desktop.", y: 280, font: .systemFont(ofSize: 13),

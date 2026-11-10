@@ -1,4 +1,4 @@
-// Compile with Sources/Atmos/Weather/WeatherKitCredentials.swift. Never copies credentials into build products.
+// Compile with Sources/Aeolian/Weather/WeatherKitCredentials.swift. Never copies credentials into build products.
 import Foundation
 import Security
 
@@ -18,7 +18,7 @@ import Security
     else { throw CocoaError(.fileReadNoPermission) }
     var access: SecAccess?
     guard
-      SecAccessCreate("Atmos Apple Weather" as CFString, [trusted] as CFArray, &access)
+      SecAccessCreate("Aeolian Apple Weather" as CFString, [trusted] as CFArray, &access)
         == errSecSuccess, let access
     else { throw CocoaError(.fileReadNoPermission) }
     let query: [String: Any] = [
@@ -29,7 +29,7 @@ import Security
     let data = try JSONEncoder().encode(credentials)
     var attributes = query
     attributes[kSecValueData as String] = data
-    attributes[kSecAttrLabel as String] = "Atmos · Apple Weather"
+    attributes[kSecAttrLabel as String] = "Aeolian · Apple Weather"
     attributes[kSecAttrAccess as String] = access
     let result = SecItemAdd(attributes as CFDictionary, nil)
     if result == errSecDuplicateItem {

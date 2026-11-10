@@ -10,4 +10,4 @@ for architecture in aarch64 x86_64; do
     if ! rustup target list --installed | /usr/bin/grep -qx "$target"; then rustup target add "$target"; fi
     cargo build --quiet --release --locked --manifest-path weather-core/Cargo.toml --target "$target"
 done
-lipo -create weather-core/target/{aarch64,x86_64}-apple-darwin/release/libatmos_weather_core.a -output .build/weather-core/libatmos_weather_core.a
+lipo -create weather-core/target/{aarch64,x86_64}-apple-darwin/release/libaeolian_weather_core.a -output .build/weather-core/libaeolian_weather_core.a

@@ -10,3 +10,8 @@ weather-core/target/
 *.provisionprofile
 .env
 .env.*
+
+__pycache__/
+*.pyc
+*.cer
+*.certSigningRequest

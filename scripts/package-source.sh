@@ -9,11 +9,11 @@ from pathlib import Path
 
 root = Path.cwd()
 version = plistlib.loads((root / 'Resources/Info.plist').read_bytes())['CFBundleShortVersionString']
-destination = root / 'dist' / f'Atmos-{version}-source.zip'
+destination = root / 'dist' / f'Aeolian-{version}-source.zip'
 destination.parent.mkdir(exist_ok=True)
 entries = [
     '.github', '.gitignore', 'LICENSE', 'NOTICE.md', 'README.md', 'RELEASING.md', 'CHANGELOG.md',
-    'Package.swift', 'Atmos.xcodeproj', 'Resources', 'Sources', 'Tests', 'docs', 'site', 'scripts',
+    'Package.swift', 'Aeolian.xcodeproj', 'Resources', 'Sources', 'Tests', 'docs', 'site', 'scripts',
     'weather-core', 'build.sh', 'install.command', 'make-installer.sh', 'release.sh', 'test.sh',
 ]
 excluded = {'target', 'downloads', '.DS_Store', '__pycache__', '.env', 'xcuserdata'}
@@ -27,6 +27,6 @@ with zipfile.ZipFile(destination, 'w', compression=zipfile.ZIP_DEFLATED, compres
             if any(part in excluded or part.startswith('.env.') for part in relative.parts):
                 continue
             if file.is_file() and file.suffix not in private_suffixes and not file.is_symlink():
-                archive.write(file, Path('Atmos') / relative)
+                archive.write(file, Path('Aeolian') / relative)
 print(destination)
 PY

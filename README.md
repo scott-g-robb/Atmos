@@ -1,20 +1,20 @@
 <p align="center">
-  <img src="site/assets/icon-512.png" width="112" height="112" alt="Atmos icon">
+  <img src="site/assets/icon-512.png" width="112" height="112" alt="Aeolian icon">
 </p>
-<h1 align="center">Atmos</h1>
+<h1 align="center">Aeolian</h1>
 <p align="center">A little atmosphere on your desktop.</p>
 <p align="center">
-  <a href="https://grobb.dev/projects/atmos">Download for Mac</a> ·
-  <a href="https://github.com/scott-g-robb/Atmos/releases">GitHub Releases</a> ·
+  <a href="https://grobb.dev/projects/Aeolian">Download for Mac</a> ·
+  <a href="https://github.com/scott-g-robb/Aeolian/releases">GitHub Releases</a> ·
   <a href="#try-it">See it in motion</a> ·
   <a href="#build">Build from source</a>
 </p>
 <p align="center">macOS 14+ · Apple silicon &amp; Intel · Free for noncommercial use</p>
-<p align="center">Current build: <strong>0.14.3 (72)</strong> · <a href="CHANGELOG.md">What's changed since 0.13.2</a></p>
+<p align="center">Current build: <strong>0.14.4 (76)</strong> · <a href="CHANGELOG.md">What's changed since 0.13.2</a></p>
 
-![Snow, rain, storm clouds, mist, fireflies and autumn leaves rendered by Atmos](docs/assets/scenes.png)
+![Snow, rain, storm clouds, mist, fireflies and autumn leaves rendered by Aeolian](docs/assets/scenes.png)
 
-Atmos lives in your menu bar and brings interactive weather to your Mac. Snow settles
+Aeolian lives in your menu bar and brings interactive weather to your Mac. Snow settles
 on windows. Rain gathers in reflective puddles. Clouds curl around your cursor.
 Choose a scene, or let Live Weather follow the sky outside. Most Cloud Wisps pass behind windows, with occasional foreground billows.
 
@@ -86,7 +86,7 @@ minimization, including the curved Genie animation. Widget and icon halos are su
 and also sit behind the real objects, with no foreground filter or inverted wallpaper
 mask. Window-edge colours are cached on the GPU and follow the current window geometry
 at display refresh, avoiding delayed-capture flicker. A soft contact halo bridges the
-window shadow. Atmos's welcome and update panels stay
+window shadow. Aeolian's welcome and update panels stay
 clear and above all effects. Bloom uses occasional screenshots while fog is visible,
 shares the window texture cache with water, and can be disabled separately in Settings.
 
@@ -105,14 +105,21 @@ Warning availability depends on WeatherKit and the location. Open-Meteo uses the
 cloud and rain system, but its [forecast API](https://open-meteo.com/en/docs) does not
 provide official warnings; the menu labels warning data as unavailable.
 
-Seasonal Drift and Wildlife arrive in short spells with quiet intervals, according to
-season, hemisphere, wind, rain, warmth and daylight. Windy autumn days can carry leaves
-and maple seeds; spring brings blossom and dandelions; warm, dry days can bring
-butterflies or birds, and mild summer nights can bring fireflies. Heavy storms suppress
-these extras. The menu card shows current measurements and active layers.
+Seasonal Drift and Wildlife use distinct conditions rather than a timer or random
+rotation. In autumn, warm, gently breezy, dry weather carries maple seeds; cooler,
+wetter or stronger wind carries autumn leaves. Spring brings blossom. Warm, gentle
+summer breezes carry dandelions, hot dry weather cottonwood, and stronger warm
+breezes rose petals. Hemisphere, rainfall and daylight also shape these choices.
+Butterflies favour warm, calm daylight; birds cooler daylight; fireflies mild summer
+nights. Heavy storms suppress these extras. Unchanged observations preserve the
+same layers across weather checks, while flocks and emitters retain natural pauses.
+The menu card shows current measurements and active layers. Changing coverage
+extends or contracts the existing clouds smoothly.
 
-Wind uses a fixed compass projection from the reported direction and speed, with no
-orientation setup. Window edges split the flow and create shelter and eddies; lighter
+Wind uses the reported direction and speed: north/west travel left on screen,
+south/east travel right. Gusts vary the speed without reversing direction, and
+cloud volume and coverage move together. No orientation setup is needed.
+Window edges split the flow and create shelter and eddies; lighter
 seeds follow air more readily than heavier leaves. Leaves and petals float on actual
 puddle surfaces, ride ripples and currents, and settle back onto their ledges as water dries.
 Snow melts on contact with puddles. Butterflies turn with their flight and stay behind
@@ -122,30 +129,30 @@ sweeping through one releases its individual seeds in a soft burst.
 
 ## Install
 
-1. Download the Mac installer from [grobb.dev](https://grobb.dev/projects/atmos) or [GitHub Releases](https://github.com/scott-g-robb/Atmos/releases).
-2. Open the `.dmg` and drag **Atmos** into **Applications**.
-3. Open Atmos. A short welcome appears for each manually installed copy, including a
+1. Download the Mac installer from [grobb.dev](https://grobb.dev/projects/Aeolian) or [GitHub Releases](https://github.com/scott-g-robb/Aeolian/releases).
+2. Open the `.dmg` and drag **Aeolian** into **Applications**.
+3. Open Aeolian. A short welcome appears for each manually installed copy, including a
    replacement with the same version/build. Only a verified silent automatic relaunch
    bypasses it.
-   The panel forms outward from the Atmos icon, followed by the text and controls.
+   The panel forms outward from the Aeolian icon, followed by the text and controls.
    Choose **Next** to review permissions, or **Skip setup** to restore your previous
    choices. New installs remain empty when setup is skipped.
-4. The final screen leads to an arrow below Atmos's menu-bar icon. Open the icon to
+4. The final screen leads to an arrow below Aeolian's menu-bar icon. Open the icon to
    finish setup; the arrow fades away. **Settings → Show Setup…** reopens the guide.
 
-<p align="center"><img src="docs/assets/welcome.png" width="400" alt="Atmos welcome, with the app's weather icon, soft ambient light and optional setup"></p>
+<p align="center"><img src="docs/assets/welcome.png" width="400" alt="Aeolian welcome, with the app's weather icon, soft ambient light and optional setup"></p>
 
-The installer contains just Atmos and the Applications shortcut, with a drag-to-install
-arrow. Quit an older copy before replacing it. To uninstall, quit Atmos and move it
+The installer contains just Aeolian and the Applications shortcut, with a drag-to-install
+arrow. Quit an older copy before replacing it. To uninstall, quit Aeolian and move it
 to the Trash.
 
-The included installer is Developer ID signed but **not notarized**. If macOS blocks
-it, use **System Settings → Privacy & Security → Open Anyway**. See
-[RELEASING.md](RELEASING.md) for Developer ID signing and notarization.
+Public release installers are Developer ID signed and notarized by Apple, with
+stapled tickets for offline verification. Local development builds are separate;
+see [RELEASING.md](RELEASING.md) for the verified public packaging workflow.
 
 ## Make it yours
 
-Atmos's custom dropdown shares the welcome and update screens' soft lighting,
+Aeolian's custom dropdown shares the welcome and update screens' soft lighting,
 rounded surface and light/dark appearance. A small integrated pointer follows the
 menu-bar icon; the panel stays narrow and compact, with no continuous UI animation.
 **Live weather** shows local conditions and an **On your desktop** list of the combined
@@ -221,14 +228,14 @@ source as puddles; they do not independently start screen capture.
 ## Updates
 
 **Check for Updates…** in the menu bar checks the latest full release at
-[scott-g-robb/Atmos](https://github.com/scott-g-robb/Atmos/releases). Releases are
-identified by their **Atmos X.X.X** names. If newer, Atmos asks before downloading,
+[scott-g-robb/Aeolian](https://github.com/scott-g-robb/Aeolian/releases). Releases are
+identified by their **Aeolian X.X.X** names. If newer, Aeolian asks before downloading,
 verifying and staging it. All running copies then close before the installed app is
 replaced and reopened in the same location. If no
-newer version exists, it says **Atmos is up to date**. The prompt and progress panel
+newer version exists, it says **Aeolian is up to date**. The prompt and progress panel
 share the welcome screens’ design.
 
-Atmos checks for releases about every two hours while running and awake, whether
+Aeolian checks for releases about every two hours while running and awake, whether
 automatic installation is enabled or not. Below **Check for Updates**, the menu shows
 the last-check time and **Up-To-Date**, **Update available** or a failed-check status.
 An available update adds a small orange dot beside the menu-bar weather icon.
@@ -242,26 +249,26 @@ request macOS authorization when needed.
 
 Updates verify the release SHA-256 digest, matching bundle/version, CPU architecture
 and the existing Apple signing team before replacement. A short-lived helper stages
-the new app first, waits for Atmos to close, replaces it atomically and reopens it.
+the new app first, waits for Aeolian to close, replaces it atomically and reopens it.
 Failed replacement restores the previous copy. There is no persistent update helper.
 
 ## Privacy & weather sources
 
 - **Location Services** is requested through setup or an explicit Live Weather/Refresh action. A more accurate fix and neighbourhood-first place names improve local labels. Weather coordinates are rounded to roughly a kilometre; reverse geocoding uses coordinates rounded to roughly 100 metres. Location and weather readings remain in memory.
-- **Screenshot Access** permits occasional reduced-resolution screenshots for water reflections and fog bloom. No `SCStream`, video or audio recording is used. IOSurface images stay in GPU-accessible memory and are never saved or uploaded. Atmos windows and off-screen/fully covered windows are excluded. macOS still grants this through its **Screen & System Audio Recording** privacy category and controls any access indicators; screenshot APIs do not provide a promise that no indicator will appear. Stop Sharing/permission revocation is respected until an explicit capture choice resumes it.
+- **Screenshot Access** permits occasional reduced-resolution screenshots for water reflections and fog bloom. No `SCStream`, video or audio recording is used. IOSurface images stay in GPU-accessible memory and are never saved or uploaded. Aeolian windows and off-screen/fully covered windows are excluded. macOS still grants this through its **Screen & System Audio Recording** privacy category and controls any access indicators; screenshot APIs do not provide a promise that no indicator will appear. Stop Sharing/permission revocation is respected until an explicit capture choice resumes it.
 - **Automatic · Apple First** tries Apple on every request, retries it once after a second, then clearly labels any Open-Meteo fallback. Transient fallback checks Apple again after 30 seconds, backing off to five minutes. Selecting Apple also permits this labelled fallback after its retry; selecting Open-Meteo requests only that provider. Attribution-image failures never discard a successful weather reading.
 
 The distributed app uses native WeatherKit authorization for all Macs; users do not
 need personal keys or a developer account. Source builds need a matching WeatherKit
 profile/signing identity, or optional personal credentials in Keychain. Open-Meteo
-works without an API key. Atmos uses the
+works without an API key. Aeolian uses the
 supported Apple weather service; it does not read the Weather app's private files.
 See [weather setup](RELEASING.md#apple-weather).
 
-If Screenshot Access looks enabled in macOS but unavailable in Atmos, use
+If Screenshot Access looks enabled in macOS but unavailable in Aeolian, use
 **Settings → Permissions & Activity → Recheck Screenshot Access**. This explicitly
 verifies access with ScreenCaptureKit without starting a capture stream. macOS can
-require a fresh grant or relaunch after a signing-identity change; **Restart Atmos…**
+require a fresh grant or relaunch after a signing-identity change; **Restart Aeolian…**
 is available beside Recheck. Stop Sharing remains respected.
 
 ## Built for macOS
@@ -289,8 +296,8 @@ Requires Xcode, its command-line tools, and [Rust](https://rustup.rs/).
 
 ```sh
 ./test.sh             # Rust, Swift and Metal regression tests
-./build.sh            # Universal build/Atmos.app
-./make-installer.sh   # Verified dist/Atmos-<version>.dmg
+./build.sh            # Universal build/Aeolian.app
+./make-installer.sh   # Verified dist/Aeolian-<version>.dmg
 ./scripts/package-source.sh # Source ZIP without build products or credentials
 ./install.command     # Build, install into ~/Applications and launch
 ```
@@ -300,7 +307,7 @@ statically; users need no toolchain or runtime dependencies. Metal tests skip wh
 no compatible GPU is available.
 
 ```
-Sources/Atmos/
+Sources/Aeolian/
   App/          Lifecycle, preferences and power management
   Desktop/      Displays, window tracking and reflections
   Rendering/    Metal renderers, shaders and GPU cloud flow
@@ -313,15 +320,15 @@ Tests/                 Interaction, physics and rendering regressions
 site/                  Static project page and interactive snow demo
 ```
 
-See [RELEASING.md](RELEASING.md) for public releases and signing. Build products,
+See [RELEASING.md](RELEASING.md) for public releases and signing, and
+[App Store distribution](docs/APP_STORE.md) for the sandboxed Store build. Build products,
 profiling output and local signing material are excluded from source control.
 
 ## Credits & license
 
-Atmos grew from [Snowhush](https://github.com/mbezruchko/Snowhush) by Mykhailo Bezruchko.
-The original copyright notice and [PolyForm Noncommercial 1.0.0 license](LICENSE) are
-retained; see [NOTICE.md](NOTICE.md). This is source-available software for
-noncommercial use.
+Aeolian is developed by [grobb](https://grobb.dev/projects/Aeolian). It is source-available
+for noncommercial use under the [PolyForm Noncommercial 1.0.0 licence](LICENSE).
+Third-party notices are included in [NOTICE.md](NOTICE.md).
 
 Weather data: Apple Weather, with attribution in the app, and
 [Open-Meteo](https://open-meteo.com/) under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).

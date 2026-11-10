@@ -1,11 +1,11 @@
 [package]
-name = "atmos-weather-core"
-version = "0.14.3"
+name = "aeolian-weather-core"
+version = "0.14.4"
 edition = "2024"
 publish = false
 
 [lib]
-name = "atmos_weather_core"
+name = "aeolian_weather_core"
 crate-type = ["staticlib"]
 
 [profile.release]

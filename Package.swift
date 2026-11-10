@@ -2,20 +2,21 @@
 import PackageDescription
 
 let package = Package(
-  name: "Atmos",
+  name: "Aeolian",
   platforms: [.macOS(.v14)],
+  products: [.executable(name: "Aeolian", targets: ["Aeolian"])],
   targets: [
     .target(name: "CWeatherCore", path: "Sources/CWeatherCore", publicHeadersPath: "include"),
     .executableTarget(
-      name: "Atmos",
+      name: "Aeolian",
       dependencies: ["CWeatherCore"],
-      path: "Sources/Atmos",
+      path: "Sources/Aeolian",
       linkerSettings: [
         .unsafeFlags([
-          "-L", Context.packageDirectory + "/.build/weather-core", "-latmos_weather_core",
+          "-L", Context.packageDirectory + "/.build/weather-core", "-laeolian_weather_core",
         ])
       ]
     ),
-    .testTarget(name: "AtmosTests", dependencies: ["Atmos"]),
+    .testTarget(name: "AeolianTests", dependencies: ["Aeolian"]),
   ]
 )

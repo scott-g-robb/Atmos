@@ -1,4 +1,4 @@
-# Building & releasing Atmos
+# Building & releasing Aeolian
 
 ## Local installer
 
@@ -7,8 +7,8 @@
 ./make-installer.sh
 ```
 
-This produces a universal `build/Atmos.app`, a verified
-`dist/Atmos-<version>.dmg` and its SHA-256 checksum. `dist/Atmos.dmg` is a convenient
+This produces a universal `build/Aeolian.app`, a verified
+`dist/Aeolian-<version>.dmg` and its SHA-256 checksum. `dist/Aeolian.dmg` is a convenient
 alias. App bundles include the license and attribution. The installer shows only the app and Applications shortcut on a Retina-ready background.
 `install.command` remains available in the source for installation into `~/Applications`.
 
@@ -33,7 +33,7 @@ WEATHERKIT_PROFILE="/absolute/path/to/WeatherKit.provisionprofile" \
 ./make-installer.sh
 ```
 
-The repository includes a native **Atmos.xcodeproj** target and shared scheme with
+The repository includes a native **Aeolian.xcodeproj** target and shared scheme with
 WeatherKit enabled. `build.sh` uses this Xcode target when a profile is supplied;
 without one it retains the key-free Swift package/Open-Meteo source build.
 On this Mac, ignored `build/weatherkit-profile-path.txt` and
@@ -43,11 +43,12 @@ Profile preparation validates platform, expiry, App ID, native WeatherKit permis
 all-device distribution and the signing certificate. Private signing keys stay in
 Keychain; no private WeatherKit service key is embedded or required by users.
 
-Run `build/Atmos.app/Contents/MacOS/Atmos --verify-native-weatherkit` on the signed
+Run `build/Aeolian.app/Contents/MacOS/Aeolian --verify-native-weatherkit` on the signed
 bundle before packaging. This checks the real native API at a fixed public test
 location, forbids the personal-key fallback, and prints only success or an error
-code. Build 63 passed this check. Public release notarization remains a separate
-step; no GitHub publishing occurs during local builds.
+code. The notarized 0.14.4 build passes this check without personal credentials.
+Notarization is a separate distribution step; no GitHub publishing occurs during
+local builds or `scripts/notarize-release.sh`.
 
 The build validates and embeds the profile and adds its WeatherKit entitlements.
 Verify a live request with the enabled account before publishing. Automatic and
@@ -59,10 +60,10 @@ For a personal WeatherKit service key, store credentials only in the login Keych
 
 ```sh
 mkdir -p build
-swiftc Sources/Atmos/Weather/WeatherKitCredentials.swift \
+swiftc Sources/Aeolian/Weather/WeatherKitCredentials.swift \
   scripts/configure-apple-weather.swift -o build/configure-apple-weather
 build/configure-apple-weather /path/to/AuthKey.p8 KEY_ID TEAM_ID SERVICE_ID \
-  /absolute/path/to/Atmos.app
+  /absolute/path/to/Aeolian.app
 ```
 
 The utility validates the key and grants the app's signing identity access. Keep
@@ -70,9 +71,30 @@ that identity stable across updates. Never distribute the private key. Public
 builds need native WeatherKit authorization or a separately operated token service.
 Changing a bundle identifier may require granting Location and Screen Recording
 permissions again and reconfiguring personal Keychain access. Existing preferences
-from earlier Atmos builds are migrated automatically.
+from earlier Aeolian builds are migrated automatically.
 
 ## Publish a release
+
+Developer ID and WeatherKit authorization do **not** replace notarization. An
+unnotarized Developer ID build is rejected by Gatekeeper on other Macs. Never
+upload a plain local installer as a public release.
+
+To prepare public files locally without committing or publishing anything:
+
+```sh
+./test.sh
+./build.sh
+./scripts/notarize-release.sh
+./scripts/package-source.sh
+```
+
+The notarization script uses the `atmos` Keychain profile (`NOTARY_PROFILE`
+overrides it), requires Apple's **Accepted** result for both the app and disk
+image, staples and validates both tickets, assesses both with Gatekeeper, then
+regenerates checksums. It packages the stapled app inside the installer. Results
+are retained under ignored `build/verification/notary-<version>-<build>/`.
+No private key or password is copied into the release. The updater assesses the
+new app with Gatekeeper before closing the running version.
 
 Prerequisites: a clean Git checkout with your own `origin`, an authenticated
 [GitHub CLI](https://cli.github.com/), a **Developer ID Application** certificate,
@@ -80,13 +102,13 @@ and a `notarytool` Keychain profile. The default profile name is `atmos`.
 
 ```sh
 xcrun notarytool store-credentials atmos
-./release.sh 0.14.3 "Release notes"
+./release.sh 0.14.4 "Release notes"
 ```
 
 The script tests and builds both architectures, notarizes and staples the app,
 creates and notarizes the disk image, updates its checksum, pushes the commit and
-publishes a GitHub release with `Atmos.dmg` and `Atmos.dmg.sha256`. It uses the
-repository `scott-g-robb/Atmos`; `RELEASE_REPOSITORY=owner/Atmos` overrides it.
+publishes a GitHub release with `Aeolian.dmg` and `Aeolian.dmg.sha256`. It uses the
+repository `scott-g-robb/Aeolian`; `RELEASE_REPOSITORY=owner/Aeolian` overrides it.
 `NOTARY_PROFILE` selects another Keychain profile. It never publishes to the
 original Snowhush repository.
 
@@ -100,10 +122,10 @@ Do not commit `.build/`, `build/`, `dist/`, credentials, profiles or signing key
 The source archive in `dist/` excludes those generated and private files.
 
 `site/` is a static page with no build step. Its canonical URL is
-`https://grobb.dev/projects/atmos`; publish its contents at that route. Asset URLs are
+`https://grobb.dev/projects/Aeolian`; publish its contents at that route. Asset URLs are
 relative so the page also works under a project subdirectory.
 
-The page downloads `Atmos.dmg` from the latest `scott-g-robb/Atmos` GitHub release.
+The page downloads `Aeolian.dmg` from the latest `scott-g-robb/Aeolian` GitHub release.
 Create that repository and publish the first release before deploying the page.
 
 ## App icon
@@ -159,7 +181,7 @@ must project a horizontal orbit around the stem, never a flat screen-plane pinwh
 Check diagonal window throws for both velocity components, cohesive blobs and thin
 ligaments during fast cursor strokes, and sharp foam bubbles fading within a second.
 All six floating drift styles must share splash momentum. Maple rotor inclination
-and lean must vary between individual seeds. The current release is 0.14.3 (build 72).
+and lean must vary between individual seeds. The current release is 0.14.4 (build 76).
 Keep the previous stable 0.14.0 artifacts; discard superseded experimental packages.
 
 For build 50, check flotation on the landing frame and after water rises beneath
@@ -260,8 +282,8 @@ minor 0.45, moderate 0.72, severe 0.90, extreme 1.00; unknown severity uses 0.65
 These are visual weights, not claimed visibility measurements. Humidity must not
 override the severity distinction. Increases, decreases and expiry blend smoothly.
 
-Fog bloom includes windows, desktop icons, wallpaper and Atmos effects. A single
-ScreenCaptureKit stream serves fog and live water, excludes Atmos itself, and has
+Fog bloom includes windows, desktop icons, wallpaper and Aeolian effects. A single
+ScreenCaptureKit stream serves fog and live water, excludes Aeolian itself, and has
 no audio. Snapshot/Wallpaper water retains its selected source when fog needs live
 capture. Fog Bloom and Screen Reflections are independent controls. Test each
 combination, drying/retiring scenes, permission denial/revocation, Stop Sharing,
@@ -276,7 +298,7 @@ Check the exact welcome copy, Back/Next/Skip, light/dark appearance, Reduce Moti
 all permission states and returning from System Settings. No permission is needed
 to continue. Open at Login is optional. The guide must track the actual status icon,
 stay above other windows, allow clicks through to the icon, and fade only when the
-root Atmos menu opens. Setup completion is persisted only after Skip or that click;
+root Aeolian menu opens. Setup completion is persisted only after Skip or that click;
 quitting mid-setup presents it again. Show Setup can replay it without changing
 weather preferences. System permission prompts must stay in front of setup itself.
 
@@ -308,8 +330,8 @@ transforms compensate for AppKit's layer anchor to keep scaling centred. Check f
 Updates has a separate menu section below Settings. Test all reflection-source
 combinations, Stop Sharing, locking, sleeping and fullscreen suspension.
 
-The manual updater uses GitHub’s latest full release, parsing `Atmos X.X.X` from
-its name; tags can differ. Publish an Atmos DMG with the API SHA-256 digest or a
+The manual updater uses GitHub’s latest full release, parsing `Aeolian X.X.X` from
+its name; tags can differ. Publish an Aeolian DMG with the API SHA-256 digest or a
 matching `.sha256` asset. Keep the bundle identifier and Apple signing team stable.
 Unsigned/ad-hoc or foreign-publisher replacements are rejected. A certificate can
 rotate within the same Apple team. Developer ID signing/notarization remains the
@@ -396,7 +418,7 @@ rendering without interrupting weather acquisition; lock/sleep still pause both.
 Verify the Developer ID signature, embedded macOS profile and WeatherKit entitlement
 on both architectures. The profile must authorize all devices, not a development
 UDID list. Native verification must succeed without personal credentials. Include
-Atmos.xcodeproj and its shared scheme in the source archive; exclude xcuserdata,
+Aeolian.xcodeproj and its shared scheme in the source archive; exclude xcuserdata,
 profiles, certificates and private keys.
 
 Check the 320-point-wide, at-most-520-point-high dropdown on light/dark desktops and
@@ -633,7 +655,7 @@ immediately, while Reduce Motion retains a short opacity-only arrival.
 Build 72 adds the optional customisation page after permissions, before the menu
 guide. Leaving permissions still prepares weather immediately; rendering remains
 paused throughout customisation. Back navigation, early menu clicks and the final
-activation are covered. Appearance/accent apply to Atmos panels, while individual
+activation are covered. Appearance/accent apply to Aeolian panels, while individual
 temperature/wind/rainfall/visibility overrides affect UI conversions only. Settings
 has Personalisation, Weather & Desktop, Privacy & Permissions, and App & Updates.
 Compact now uses actual temperature; Full uses feels-like temperature and condition.
@@ -643,3 +665,59 @@ haze renderer. The original cloud-volume reference checks remain intact.
 Blue is the default accent; six solid colour swatches are offered, with no rainbow
 or system-accent option. Match System applies only to light/dark appearance.
 265 Swift and 14 Rust tests passed without skips. Artifacts: build/verification/personal72.
+
+
+## 0.14.4 continuity and public distribution checks
+
+Weather observations select seasonal and wildlife accents using distinct, mutually
+exclusive weather and seasonal scenarios; they never rotate by clock bucket. The removed 12-second timer must not return: reopening menus, changing
+activity or starting a fetch must not re-roll layers. Current scenes remain active
+while location and providers are refreshed. Equal scene descriptions and intensity
+updates are ignored at the display boundary. Coverage and climate approach their
+new targets on the existing simulation. Primary weather changes transfer ownership
+of the formed sky, its wind phase and entrance progress to avoid overlapping sky
+fade-outs and restarts.
+
+North/west wind travels left; south/east right, divided at the NE/SW diagonals. Gusts
+change magnitude without changing the prevailing sign. Coverage, volume detail and
+underside use integrated displacement, never absolute time multiplied by a changing
+gust. Regression images compare the original volume at the same displaced
+coordinates, keeping the existing strict one-channel-level appearance tolerance.
+
+Activity checks consider the foreground, Dock and native background layers. A
+normal application/context menu covering one layer must not fade or pause the
+others. Fullscreen, session inactivity, lock and sleep still suspend work. Native
+event-tracking mode has an explicit display-clock regression.
+
+Both public architectures must have a Developer ID signature, hardened runtime,
+a secure Apple timestamp and no get-task-allow entitlement. Xcode Release disables
+development base-entitlement injection; build.sh explicitly signs the canonical
+WeatherKit entitlements with the validated all-device profile. The signing
+verification script rejects the former missing timestamp/debug-entitlement error
+before submission. Apple accepted and stapled both the 0.14.4 (76) app and DMG;
+Gatekeeper accepts the app, mounted installer app, DMG and a quarantined test copy.
+Native WeatherKit verification still succeeds without personal credentials.
+
+For the complete release checks, include the local notarized installer:
+
+```sh
+ATMOS_TEST_INSTALLER="$PWD/dist/Aeolian-0.14.4.dmg" \
+ATMOS_TEST_NATIVE_LIFECYCLE=1 ATMOS_TEST_GITHUB=1 ./test.sh
+```
+
+The local installer test exercises the production updater's mount, copy, publisher,
+architecture and Gatekeeper preparation before any running app is closed. Older
+published unnotarized releases are expected to fail that last check. The existing
+installer tests still cover waiting for old processes, atomic replacement, rollback
+and silent relaunch. Verification logs are in build/verification/release144 and
+build/verification/notary-0.14.4-76. GitHub uploading remains a separate step.
+
+## Mac App Store
+
+See [docs/APP_STORE.md](docs/APP_STORE.md) for the separate sandboxed build, signed
+installer, upload procedure, current submission state and rebrand migration. The
+Store build omits private window-server APIs and the direct GitHub installer.
+
+Build resource copying removes inherited download quarantine metadata before
+signing. The Store audit rejects any remaining quarantine attribute anywhere in
+the bundle; this prevents the ITMS-91109 rejection seen in the first upload.

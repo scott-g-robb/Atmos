@@ -5,9 +5,9 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Atmos</string>
+	<string>Aeolian</string>
 	<key>CFBundleExecutable</key>
-	<string>Atmos</string>
+	<string>Aeolian</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIconName</key>
@@ -17,15 +17,15 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Atmos</string>
+	<string>Aeolian</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.14.3</string>
+	<string>0.14.4</string>
 	<key>CFBundleVersion</key>
-	<string>72</string>
+	<string>76</string>
 	<key>LSApplicationCategoryType</key>
-	<string>public.app-category.lifestyle</string>
+	<string>public.app-category.weather</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
@@ -33,10 +33,12 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
-	<string>© 2026 grobb. Portions © 2026 Mykhailo Bezruchko.</string>
+	<string>© 2026 Scott Graeme Robb.</string>
 	<key>NSLocationUsageDescription</key>
 	<string>Live Weather uses your approximate location for local conditions from Apple Weather, or Open-Meteo when Apple Weather is unavailable. The menu shows the active source.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>Atmos takes occasional reduced-resolution screenshots for water reflections and fog glow. Images stay in memory on this Mac and are never saved or uploaded. Atmos does not record video or audio.</string>
+	<string>Aeolian takes occasional reduced-resolution screenshots for water reflections and fog glow. Images stay in memory on this Mac and are never saved or uploaded. Aeolian does not record video or audio.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

@@ -188,3 +188,28 @@ Raw local reports: `build/verification/hybrid-before`, `hybrid-after`, `rust-bef
 `rust-after` and `hybrid68`. Test/render artifacts and profiles are excluded from
 the uploadable source archive. The signed app and installer include the supplied
 6.32-second intro audio; welcome playback is once per flow, quiet on silent updates.
+
+
+## 0.14.4 continuity check
+
+Short sequential samples used the same visible-fog diagnostic (fog 0.72, cloud
+coverage 58%, cached screenshot bloom and native geometry) on the 120 Hz M5 display:
+
+| Build | Native presentations/s | Process CPU | Geometry queries in sample |
+| --- | ---: | ---: | ---: |
+| Installed 0.14.3 (72) | 119.81 | 17.66% | 59 |
+| Notarized 0.14.4 (73) | 119.91 | 16.81% | 58 |
+
+Each measured interval was about 12 seconds after warmup. The installed app also
+remained open during both diagnostics; other desktop activity and GPU scheduling
+were not controlled. These are pacing/regression observations, not evidence of a
+general CPU speedup or a ≤5% CPU result. They exclude WindowServer CPU. Particle
+counts were 11 in each run; the capture status was Fog bloom · Cached screenshots.
+The release changes do not reduce render resolution, particle counts or native
+refresh. No Rust physics algorithm changed in this release.
+
+Full reports are in ignored build/verification/release144/visible-fog.json and
+baseline72-visible-fog.json. The event-tracking regression confirms native frames
+continue both during a context-menu run-loop mode and after returning to default
+mode. The sky continuity tests cover identical refreshes, 50→60% cover, primary
+precipitation changes, persistent wind direction and observation-stable accents.

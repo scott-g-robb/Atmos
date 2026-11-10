@@ -1,4 +1,23 @@
-# Atmos changes
+# Aeolian changes
+
+## 0.14.4 — Aeolian, a continuous sky
+
+- Atmos is now Aeolian. App, installer, menus, project and repository names are
+  updated while the bundle identifier, saved settings and WeatherKit access remain stable.
+- Dismissing a context menu no longer moves foreground cloud wisps behind all
+  windows. Temporary menus no longer collect particles like window ledges.
+
+- Weather refreshes preserve the existing composition. Coverage and rainfall
+  interpolate in place; changing precipitation inherits the already formed sky.
+- Clouds follow accumulated wind motion consistently: north/west travel left,
+  south/east right. Gusts change speed without reversing the prevailing direction.
+- Seasonal drift and wildlife use distinct weather scenarios. Unchanged conditions
+  retain the same layers across checks, with natural pauses in their emitters.
+- Background atmosphere remains active when a foreground overlay is covered;
+  menus do not fade all rendering layers away. Rest detection includes stacked effects.
+- Public release signing removes debug entitlements, requires secure timestamps
+  on both architectures, and verifies Apple's notarization and stapled tickets for
+  the app and installer. Updates check Gatekeeper before closing the running app.
 
 ## 0.14.3 — Local conditions, smoother desktop motion
 

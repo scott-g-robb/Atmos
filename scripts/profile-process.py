@@ -3,7 +3,7 @@
 
 GPU time is IOAccelerator's per-process accumulatedGPUTime counter (nanoseconds),
 so 100% means one second of GPU residency per elapsed second, as in Activity Monitor.
-Includes Atmos's submitted render work; WindowServer/capture-service work belongs to
+Includes Aeolian's submitted render work; WindowServer/capture-service work belongs to
 those processes. Run with a visible, warmed-up scene, and record the capture state.
 """
 import argparse,json,pathlib,plistlib,subprocess,time
